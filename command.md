@@ -11,6 +11,10 @@
 
 本文档说明 HDS Interlude 当前提供的 Koishi 指令。指令默认只在私聊中使用，并且会经过 OneBot/NapCat 白名单检查。
 
+## 图片生成
+
+`interlude.image <图片描述>` 使用 `model.imageGeneration` 的独立 endpoint、密钥和模型生成一张 QQ 图片。它不自动复用主叙事或 Embedding 的模型连接，并且只允许管理员执行；请先在 Console 的“模型”中启用并填写图片生成配置。
+
 `blindMode.enabled=true` 时，本页全部指令以及当前 Koishi 实例的其它已解析指令都会被静默屏蔽；请在 Console 关闭失明模式并重载插件后再使用管理功能。
 
 ## 权限模型

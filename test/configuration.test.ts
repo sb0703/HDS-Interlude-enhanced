@@ -59,7 +59,10 @@ test('layered colored logs are the Console default and remain optional', () => {
 
 test('model Console centralizes connections and task assignment without exposing IDs', () => {
   const model = Config.dict.model.dict
-  assert.deepEqual(Object.keys(model).slice(0, 2), ['vision', 'providers'])
+  assert.deepEqual(Object.keys(model).slice(0, 3), ['vision', 'imageGeneration', 'providers'])
+  assert.equal(model.imageGeneration.dict.enabled.meta.default, false)
+  assert.equal(model.imageGeneration.dict.mode.meta.default, 'openai-images')
+  assert.equal(model.imageGeneration.dict.model.meta.default, 'cogview-3-flash')
   assert.equal('mode' in model, false)
   assert.equal('zhipu' in model, false)
   assert.equal('models' in model, false)

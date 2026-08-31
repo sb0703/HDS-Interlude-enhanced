@@ -1,5 +1,5 @@
-import { Context, Schema, Session } from 'koishi'
-import { CompactionConfig, EmbeddingConfig, FailoverConfig, ModelConfig, ProviderConfig, VisionConfig } from './narrator'
+import { Context, h, Schema, Session } from 'koishi'
+import { CompactionConfig, EmbeddingConfig, FailoverConfig, ImageGenerationConfig, ModelConfig, ProviderConfig, VisionConfig } from './narrator'
 import { BlindModeConfig, BrowserConfig, ChatActionsConfig, Config as InterludeConfig, extractSessionVoiceCount, GroupChatRule, InterludeService, LoggingConfig, MemoryConfig, OneBotAccountRule, OneBotNapCatConfig, RestWindow, RuntimeConfig, SharedStoryConfig, StickerLibraryConfig, StoryDefaults } from './service'
 import { AgencyConfig, AlterSystemConfig, ChatReactionName, NativeFaceSemantic, StorySetting } from './types'
 import { HDS_INTERLUDE_VERSION } from './meta'
@@ -109,8 +109,28 @@ const Vision: Schema<VisionConfig> = Schema.object({
   enabled: Schema.boolean().default(false).description('原生识图开关。开启后，当前私聊图片会作为多模态输入发送给所选 OpenAI-compatible 主模型；模型本身必须支持视觉输入。图片不会写入剧本数据库。'),
 }).collapse(true)
 
+const ImageGeneration: Schema<ImageGenerationConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('启用独立文生图接口。默认关闭；开启后，用户求图、剧情明确发出照片的主动联系与自动推进（受主动消息开关与 Agency 门槛约束）以及手动 interlude.image 指令都会调用并产生费用。'),
+  mode: Schema.union(['openai-images', 'dashscope-qwen-image']).default('openai-images').description('接口协议。智谱及其它 /images/generations 服务选 openai-images；千问 Qwen-Image-3.0 选 dashscope-qwen-image。'),
+  endpoint: Schema.string().default('https://open.bigmodel.cn/api/paas/v4/images/generations').description('完整图片生成地址。Qwen-Image-3.0 使用百炼原生 /api/v1/services/aigc/multimodal-generation/generation。'),
+  apiKey: Schema.string().role('secret').default('').description('图片生成专用 API Key；不会自动复用主聊天或 Embedding 的密钥。'),
+  model: Schema.string().default('cogview-3-flash').description('图片生成模型代码，例如 cogview-3-flash、glm-image 或 qwen-image-3.0。'),
+  size: Schema.string().pattern(/^\d{2,5}x\d{2,5}$/).default('1024x1024').description('图片尺寸，例如 1024x1024。实际可用尺寸由图片模型决定。'),
+  quality: Schema.string().default('standard').description('图片质量参数；不支持 quality 的服务商可留空。'),
+  timeout: Schema.natural().min(5_000).max(300_000).default(120_000).role('ms').description('单次图片生成超时，单位毫秒。'),
+  maxPromptCharacters: Schema.natural().min(100).max(8_000).default(2_000).description('单次送入图片模型的描述最大字符数。'),
+  extraHeaders: Schema.string().role('textarea').default('').description('图片接口额外请求头，必须是 JSON 对象；无特殊需求留空。'),
+  extraBody: Schema.string().role('textarea').default('').description('图片接口额外请求体字段，必须是 JSON 对象；可用于兼容服务商特有参数。'),
+  characterReference: Schema.object({
+    enabled: Schema.boolean().default(false).description('启用角色参考图。仅在本次要生成人物本人时由剧情模型选择；风景、物品等仍使用上方纯文生图模型。'),
+    source: Schema.string().role('textarea').default('').description('参考照片：每行一张，或用英文分号 ; / 竖线 | 分隔，最多三张；支持本机 PNG/JPG/WEBP 绝对路径、HTTPS 图片地址或 data:image Base64 数据。建议先放五官照，再放半身或全身照。'),
+    model: Schema.string().default('qwen-image-edit').description('角色参考图模型，推荐 qwen-image-edit；与上方 DashScope 原生 endpoint、API Key 共用。'),
+  }).collapse(true).default({ enabled: false, source: '', model: 'qwen-image-edit' }).description('角色参考图：人物体貌特征直接取自 storyDefaults.characterProfile，不会强制应用到风景或物品图片。'),
+}).collapse(true)
+
 const Model: Schema<ModelConfig> = Schema.object({
   vision: Vision.default({ enabled: false }).description('图片理解：开启后把当前私聊图片送入主叙事模型。请只为明确支持视觉输入的模型开启。'),
+  imageGeneration: ImageGeneration.default({ enabled: false, mode: 'openai-images', endpoint: 'https://open.bigmodel.cn/api/paas/v4/images/generations', apiKey: '', model: 'cogview-3-flash', size: '1024x1024', quality: 'standard', timeout: 120_000, maxPromptCharacters: 2_000, extraHeaders: '', extraBody: '', characterReference: { enabled: false, source: '', model: 'qwen-image-edit' } }).description('图片生成：独立 endpoint、密钥和模型。剧情明确要发送图片时可自动调用；角色参考图仅用于人物本人。'),
   providers: Schema.array(Provider.collapse(true)).default([defaultProvider]).description('模型中心：每一行一次性填写连接、密钥、模型名和用途分配。无需填写或记忆任何 ID。'),
   mainTemperature: Schema.number().min(0).max(2).default(0.8).description('主叙事采样温度。'),
   mainTopP: Schema.number().min(0).max(1).default(1).description('主叙事 top-p；通常保持 1，仅调整 temperature。'),
@@ -391,7 +411,7 @@ const SharedStory: Schema<SharedStoryConfig> = Schema.object({
 export const Config: Schema<InterludeConfig> = Schema.object({
   blindMode: BlindMode,
   storyDefaults: StoryDefaults.description('1. 剧本起点：主角、世界、默认关系、地点、时区和叙事风格。'),
-  model: Model.description('2. 模型：服务商、模型预设、主叙事、压缩、Embedding 与视觉输入。'),
+  model: Model.description('2. 模型：服务商、模型预设、主叙事、压缩、Embedding、视觉输入与独立图片生成。'),
   onebot: OneBot.description('3. OneBot/NapCat：机器人账号、私聊白名单和群聊白名单。'),
   chatActions: ChatActions.default({ enabled: false, platforms: ['qq'], quoteReply: true, messageReactions: true, allowedReactions: ['like', 'smile', 'laugh', 'heart'], nativeFaces: true, expressionThreshold: 0.7, allowedNativeFaces: ['smile', 'laugh', 'sweat', 'awkward'] }).description('4. 聊天动作：按平台启用指定回复与消息表情；只有已注册能力才进入提示词。'),
   stickers: Stickers.default({ enabled: false, directory: 'data/hds-interlude/stickers', maxFileSizeMB: 10, catalogLimit: 40 }).description('5. 本地表情包：每五分钟扫描新增素材，并由勾选 useForStickers 的视觉模型生成描述。'),
@@ -436,6 +456,20 @@ export function apply(ctx: Context, config: InterludeConfig) {
 
 function registerCommands(ctx: Context, service: InterludeService) {
   ctx.command('interlude', 'HDS Interlude：私聊故事测试与管理命令')
+
+  ctx.command('interlude.image <prompt:text>', '管理员：使用独立配置的文生图模型生成并发送一张图片')
+    .action(async ({ session }, prompt) => {
+      if (!requireManager(service, session)) return '无权限：图片生成仅允许 HDSI 管理员执行。'
+      const text = String(prompt ?? '').trim()
+      if (!text) return '请提供图片描述，例如：interlude.image 雨夜便利店门口，一只橘猫趴在暖光下。'
+      try {
+        const image = await service.generateImage(text)
+        await session.send(h.image(image.url))
+        return '图片已生成并发送。'
+      } catch (error) {
+        return `图片生成失败：${error instanceof Error ? error.message : String(error)}`
+      }
+    })
 
   const startStoryFromConsole = async (session: Session, legacyName?: string) => {
     if (!requireManager(service, session)) return '无权限：手动启动共享主剧本需要 HDSI 管理员权限。'

@@ -1,7 +1,7 @@
 import { Context, Service, Session } from 'koishi';
 import { ModelConfig } from './narrator';
 import { GroupWillingnessConfig } from './group-willingness';
-import { InterludeArc, InterludeScene, InterludeParticipant, InterludeStory, NarrativeDecision, NarrativeFact, NarrativeIntent, GroupContext, NarrativeProvider, NarrativeRequest, NarrativeCompactor, NarrativeEmbedder, OutgoingMessageDraft, ScriptEntry, StatePatchProposal, StorySetting, StoryState, OverlaySnapshot, AlterSystemConfig, AgencyConfig, ScenePresenceState, ChatActionCapabilities, ChatReactionName, MessageReactionDraft, NativeFaceSemantic, QuotedMessageContext } from './types';
+import { InterludeArc, InterludeScene, InterludeParticipant, InterludeStory, NarrativeDecision, NarrativeFact, NarrativeIntent, GroupContext, NarrativeInteraction, NarrativeProvider, NarrativeRequest, NarrativeCompactor, NarrativeEmbedder, OutgoingMessageDraft, ScriptEntry, StatePatchProposal, StorySetting, StoryState, OverlaySnapshot, AlterSystemConfig, AgencyConfig, ScenePresenceState, ChatActionCapabilities, ChatReactionName, MessageReactionDraft, NativeFaceSemantic, ImageSubject, QuotedMessageContext } from './types';
 export interface Config {
     /** Immersive operation that suppresses HDSI visibility and Koishi commands. */
     blindMode?: BlindModeConfig;
@@ -73,6 +73,10 @@ export interface StickerLibraryConfig {
     directory: string;
     maxFileSizeMB: number;
     catalogLimit: number;
+}
+export interface VoiceTranscriptionConfig {
+    enabled: boolean;
+    timeoutMs: number;
 }
 export interface GroupChatRule {
     groupId: string;
@@ -290,6 +294,7 @@ export declare class InterludeService extends Service {
     private narrator;
     private compactor;
     private embedder;
+    private imageGenerator;
     private stickerDescriber;
     private stickerCatalog;
     private stickerById;
@@ -508,6 +513,11 @@ export declare class InterludeService extends Service {
     private shouldRefreshContinuity;
     private tryDecide;
     private persistDecision;
+    /** Generate one image via the separately configured image endpoint. */
+    generateImage(prompt: string, options?: {
+        subject?: ImageSubject;
+        characterAppearance?: string;
+    }): Promise<import("./narrator").GeneratedImage>;
     private get alterSystemConfig();
     private get agencyConfig();
     private get blindModeConfig();
@@ -583,6 +593,9 @@ export declare class InterludeService extends Service {
      * sending every reply back to the account that happened to trigger the turn.
      */
     private sendOutgoingMessages;
+    /** Records only a successfully transported generated image; the URL remains
+     * out of narrative memory because it is temporary provider output. */
+    private recordGeneratedImageDelivery;
     private resolveLiteralQuoteMessageId;
     private recordLiteralQuoteTransport;
     /** Records only completed background deliveries. It is intentionally a
@@ -688,6 +701,17 @@ export declare function extractSessionVoiceCount(session: Pick<Session, 'content
  * narrator distinguish recognized speech from ordinary typed text. */
 export declare function mergeUserMessageWithVoiceTranscripts(text: string, transcripts: string[], detected?: number): string;
 /**
+ * OneBot delivers the referenced message separately from the new message.
+ * Preserve that text so short follow-ups such as “这个什么意思” remain grounded.
+ */
+export declare function formatQuotedMessageContext(quote: unknown, selfId?: unknown): string;
+export declare function extractQuotedMessageContext(quote: unknown, selfId?: unknown): {
+    occurredAt?: string;
+    content: string;
+    fromCharacter: boolean;
+    messageId: string;
+};
+/**
  * A model's willingness is an intent estimate, not a transport permission.
  * Native faces need a visible-text counterpart so a model cannot turn every
  * routine reply into a face merely by returning willingness=1. The 0.90 cap
@@ -709,6 +733,22 @@ export declare const resolveBlackBoxConfig: typeof resolveBlindModeConfig;
  * evidence. This keeps named supporting cast available without treating them
  * as automatically present. */
 export declare function normalizeScenePresenceDrafts(value: unknown, entries: ScriptEntry[], now?: Date): ScenePresenceState[];
+/**
+ * A paid image may ride only on a message that will actually be delivered:
+ * an immediate private reply, or an immediate cross-conversation action from
+ * an advance passage. Anything else leaves the image nowhere to go.
+ */
+export declare function narrativeImageAttachable(imageGenerationEnabled: boolean, interaction: NarrativeInteraction | undefined, crossActions: readonly {
+    mode?: string;
+}[]): boolean;
+export declare function normalizeNarrativeImageGeneration(value: unknown): {
+    prompt: string;
+    subject: ImageSubject;
+};
+/** The story profile remains the sole editable character canon. Prefer its
+ * explicit appearance section; older profiles safely fall back to a bounded
+ * extract instead of requiring a second, drifting configuration. */
+export declare function characterAppearanceFromProfile(profile: string | undefined): string;
 /** Keeps a single due-turn private to one relationship while ensuring that
  * every plan that was already due at the start of the sweep gets a chance to
  * be judged before the next sweep interval. */

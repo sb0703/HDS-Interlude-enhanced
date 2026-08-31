@@ -1,6 +1,8 @@
 import { Context, Logger } from 'koishi'
+import { readFile } from 'node:fs/promises'
+import { extname } from 'node:path'
 import {
-  AlterAnalysisDecision, AlterAnalysisRequest, AlterSystemConfig, ChatActionCapabilities, CompactionDecision, CompactionRequest, NarrativeDecision, NarrativeProvider,
+  AlterAnalysisDecision, AlterAnalysisRequest, AlterSystemConfig, ChatActionCapabilities, CompactionDecision, CompactionRequest, ImageSubject, NarrativeDecision, NarrativeProvider,
   OverlayCompactionDecision, OverlayCompactionRequest,
   NarrativeCompactor, NarrativeEmbedder, NarrativeRequest, StickerCatalogEntry,
 } from './types'
@@ -84,10 +86,48 @@ export interface ModelConfig {
   embedding?: EmbeddingConfig
   /** OpenAI-compatible native image inputs for the current private-message turn. */
   vision?: VisionConfig
+  /** Independently configured text-to-image endpoint. It never reuses the chat route implicitly. */
+  imageGeneration?: ImageGenerationConfig
 }
 
 export interface VisionConfig {
   enabled: boolean
+}
+
+/** A dedicated OpenAI Images-compatible route, separate from chat and embedding. */
+export interface ImageGenerationConfig {
+  enabled: boolean
+  mode: ImageGenerationMode
+  endpoint: string
+  apiKey: string
+  model: string
+  size: string
+  quality: string
+  timeout: number
+  maxPromptCharacters: number
+  extraHeaders: string
+  extraBody: string
+  /** Optional portrait-consistency route for images that visibly depict the protagonist. */
+  characterReference?: CharacterReferenceImageConfig
+}
+
+export interface CharacterReferenceImageConfig {
+  enabled: boolean
+  /** Local image path, HTTPS URL, or data:image Base64 URI. */
+  source: string
+  /** A DashScope image-edit model, normally qwen-image-edit. */
+  model: string
+}
+
+export type ImageGenerationMode = 'openai-images' | 'dashscope-qwen-image'
+
+export interface GeneratedImage {
+  url: string
+  revisedPrompt?: string
+}
+
+export interface ImageGenerator {
+  generate(prompt: string, options?: { subject?: ImageSubject; characterAppearance?: string }): Promise<GeneratedImage>
 }
 
 export interface ModelProfile {
@@ -156,6 +196,11 @@ interface EmbeddingResponse {
   data?: Array<{ embedding?: number[] }>
 }
 
+interface ImageGenerationResponse {
+  data?: Array<{ url?: unknown, b64_json?: unknown, revised_prompt?: unknown }>
+  output?: { choices?: Array<{ message?: { content?: Array<{ image?: unknown }> } }> }
+}
+
 interface ResolvedModelTarget {
   providerId: string
   model: string
@@ -198,6 +243,135 @@ export class SilentCompactor implements NarrativeCompactor {
 /** A no-op embedder lets memory retrieval fall back to rule-based ranking. */
 export class SilentEmbedder implements NarrativeEmbedder {
   async embed(): Promise<number[]> { return [] }
+}
+
+class DisabledImageGenerator implements ImageGenerator {
+  async generate(): Promise<GeneratedImage> {
+    throw new Error('图片生成功能未启用。请在 Console 的“模型”中配置并启用 imageGeneration。')
+  }
+}
+
+/** Minimal OpenAI Images API client; compatible with Zhipu's /images/generations route. */
+export class OpenAICompatibleImageGenerator implements ImageGenerator {
+  constructor(private ctx: Context, private config: ImageGenerationConfig) {}
+
+  async generate(prompt: string, options: { subject?: ImageSubject; characterAppearance?: string } = {}): Promise<GeneratedImage> {
+    const endpoint = this.config.endpoint?.trim()
+    const apiKey = this.config.apiKey?.trim()
+    const reference = options.subject === 'protagonist' ? this.config.characterReference : undefined
+    const model = (reference?.enabled ? reference.model : this.config.model)?.trim()
+    if (!this.config.enabled) throw new Error('图片生成功能未启用。')
+    if (!endpoint || !model) throw new Error('图片生成缺少 endpoint 或 model 配置。')
+    if (!apiKey) throw new Error('图片生成缺少独立 API Key 配置。')
+    if (!/^https:\/\//i.test(endpoint)) throw new Error('图片生成 endpoint 必须使用 HTTPS。')
+    const text = prompt.trim().slice(0, Math.max(1, this.config.maxPromptCharacters))
+    if (!text) throw new Error('请提供图片描述。')
+    const size = this.config.size?.trim()
+    if (size && !/^\d{2,5}x\d{2,5}$/i.test(size)) throw new Error('图片尺寸必须是如 1024x1024 的格式。')
+    if (reference?.enabled && this.config.mode !== 'dashscope-qwen-image') {
+      throw new Error('角色参考图仅支持 DashScope 原生多模态图片接口。')
+    }
+    if (reference?.enabled && !reference.source?.trim()) throw new Error('角色参考图已启用，但尚未配置图片来源。')
+    if (this.config.mode === 'dashscope-qwen-image') {
+      const referenceImages = reference?.enabled ? await resolveCharacterReferenceImages(reference.source) : []
+      return this.generateDashscopeQwenImage(endpoint, apiKey, model, text, size, referenceImages, options.characterAppearance)
+    }
+    const body = {
+      ...parseObject(this.config.extraBody, 'imageGeneration.extraBody'),
+      model,
+      prompt: text,
+      ...(size ? { size } : {}),
+      ...(this.config.quality?.trim() ? { quality: this.config.quality.trim() } : {}),
+    }
+    const response = await this.ctx.http.post<ImageGenerationResponse>(endpoint, body, {
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+        ...parseObject(this.config.extraHeaders, 'imageGeneration.extraHeaders'),
+      },
+      timeout: this.config.timeout,
+    })
+    const item = response.data?.[0]
+    const url = publicGeneratedImageUrl(item?.url) || imageDataUri(item?.b64_json)
+    if (!url) throw new Error('图片生成服务没有返回可投递的图片。')
+    const revisedPrompt = typeof item?.revised_prompt === 'string' ? item.revised_prompt.trim() : ''
+    return { url, ...(revisedPrompt ? { revisedPrompt } : {}) }
+  }
+
+  private async generateDashscopeQwenImage(endpoint: string, apiKey: string, model: string, prompt: string, size: string, referenceImages: string[] = [], appearance = '') {
+    const extra = parseObject(this.config.extraBody, 'imageGeneration.extraBody')
+    const { parameters: rawParameters, ...extraBody } = extra
+    const extraParameters = rawParameters && typeof rawParameters === 'object' && !Array.isArray(rawParameters) ? rawParameters : {}
+    const response = await this.ctx.http.post<ImageGenerationResponse>(endpoint, {
+      ...extraBody,
+      model,
+      input: {
+        messages: [{
+          role: 'user',
+          content: [
+            ...referenceImages.map(image => ({ image })),
+            {
+              text: referenceImages.length
+                ? `图1是主角唯一的人物身份基准，必须保持图1的脸型、五官比例、年龄感、发际线和可见辨识特征，不得重新设计成相似但不同的人。${referenceImages.length > 1 ? `图2${referenceImages.length > 2 ? '、图3' : ''}仅补充同一主角的体型、发型或服装细节；发生冲突时以图1的人脸身份为准。` : ''}这些参考图只约束主角本人；若画面还有其他人物，不得把主角外貌复制给他们。${appearance.trim() ? `主角的固定体貌特征：${appearance.trim().slice(0, 1_200)}。` : ''}在保持主角身份不变的前提下完成以下画面：${prompt}`
+                : prompt,
+            },
+          ],
+        }],
+      },
+      parameters: {
+        ...extraParameters,
+        ...(size ? { size: size.replace('x', '*') } : {}),
+        n: 1,
+      },
+    }, {
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+        ...parseObject(this.config.extraHeaders, 'imageGeneration.extraHeaders'),
+      },
+      timeout: this.config.timeout,
+    })
+    const url = publicGeneratedImageUrl(response.output?.choices?.[0]?.message?.content?.find(item => typeof item?.image === 'string')?.image)
+    if (!url) throw new Error('百炼图片生成服务没有返回可投递的图片。')
+    return { url }
+  }
+}
+
+async function resolveCharacterReferenceImages(source: string) {
+  const sources = source.split(/\r?\n/).flatMap((line) => {
+    const value = line.trim().replace(/^("|')(.*)\1$/, '$2').trim()
+    if (!value) return []
+    // Keep data URIs intact: their own syntax contains semicolons.
+    if (/^data:/i.test(value)) return [value]
+    return value.split(/[;；|]/).map(item => item.trim().replace(/^("|')(.*)\1$/, '$2').trim()).filter(Boolean)
+  })
+  if (!sources.length) throw new Error('角色参考图已启用，但尚未配置图片来源。')
+  if (sources.length > 3) throw new Error('角色参考图最多支持三张，请用换行或分号分隔。')
+  return Promise.all(sources.map(resolveCharacterReferenceImage))
+}
+
+async function resolveCharacterReferenceImage(source: string) {
+  const value = source.trim()
+  if (/^data:image\/(?:png|jpe?g|webp);base64,/i.test(value)) {
+    const encoded = value.slice(value.indexOf(',') + 1)
+    if (encoded.length > 14 * 1024 * 1024) throw new Error('角色参考图不能超过 10MB。')
+    return value
+  }
+  if (/^https:\/\//i.test(value)) return value
+  let data: Buffer
+  try {
+    data = await readFile(value)
+  } catch (error) {
+    throw new Error(`无法读取角色参考图：${value}（${error instanceof Error ? error.message : String(error)}）`)
+  }
+  if (data.byteLength > 10 * 1024 * 1024) throw new Error('角色参考图不能超过 10MB。')
+  const extension = extname(value).toLowerCase()
+  const mimeType = extension === '.png' ? 'image/png'
+    : extension === '.webp' ? 'image/webp'
+      : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg'
+        : ''
+  if (!mimeType) throw new Error('角色参考图仅支持 PNG、JPG 或 WEBP 文件。')
+  return `data:${mimeType};base64,${data.toString('base64')}`
 }
 
 /**
@@ -643,6 +817,11 @@ export function createEmbedder(ctx: Context, config: ModelConfig): NarrativeEmbe
   return new OpenAICompatibleEmbedder(ctx, config)
 }
 
+export function createImageGenerator(ctx: Context, config: ModelConfig): ImageGenerator {
+  const image = config.imageGeneration
+  return image?.enabled ? new OpenAICompatibleImageGenerator(ctx, image) : new DisabledImageGenerator()
+}
+
 /** Zhipu's official GLM-5.3-Flash route is streamed so that a long forced
  * thinking pass is not mistaken for a whole-request timeout. The 20-second
  * guard applies only until the first visible content token; once content
@@ -852,6 +1031,29 @@ function phaseInstruction(phase: NarrativeRequest['phase']) {
   ].join('\n')
 }
 
+function publicGeneratedImageUrl(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  try {
+    const url = new URL(value.trim())
+    const host = url.hostname.toLowerCase().replace(/\.$/, '')
+    if (url.protocol !== 'https:' || host === 'localhost' || host.endsWith('.localhost') || host === '::1') return ''
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
+      const [a, b] = host.split('.').map(Number)
+      if (a === 10 || a === 127 || a === 0 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168) return ''
+    }
+    return url.toString()
+  } catch {
+    return ''
+  }
+}
+
+function imageDataUri(value: unknown) {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  const base64 = value.trim()
+  if (base64.length > 10 * 1024 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) return ''
+  return `data:image/png;base64,${base64}`
+}
+
 function agencyInstruction(phase: NarrativeRequest['phase'], enabled: boolean) {
   if (!enabled || phase === 'user-message' || phase === 'conversation-follow-up') {
     return 'Do not output agencyWindow or proactiveContact on this phase.'
@@ -924,6 +1126,7 @@ export function systemPrompt(phase: NarrativeRequest['phase'], mainPrompt: strin
     'When groupContext is present, groupReply has the shape {"mode":"none|immediate","content":"group message text when mode is immediate"}.',
     'Use seen=false and reply.mode=none when the character has not noticed the current message. Use seen=true and reply.mode=none when the character noticed it but does not reply. Do not put future prose into script.',
     'Optional non-transport fields are memories, intents, intentUpdates, browserIntents, statePatch, agencyWindow, proactiveContact, and automaticDeliverySummary. crossConversationActions is allowed only when an explicit participant list is supplied.',
+    'imageGeneration is allowed only when imageGenerationEnabled is true. Its shape is {"imageGeneration":{"prompt":"bounded visual description","subject":"protagonist|other-person|non-person"}}. Use it only when the protagonist actually completes an image send at now: on a private user-message turn when the user directly asks the protagonist to create, send, resend, or show an actual image now, paired with interaction.reply.mode="immediate"; or in an advance passage when a photo actually taken or shared in the scene is delivered to another participant, paired with exactly one immediate crossConversationAction carrying the sent message; or on a proactive-check turn when an approved proactive message delivers a photo at now, paired with interaction.reply.mode="immediate". This invokes a real paid image service and sends one image per decision: never use it merely because prose mentions a photo, image, album, camera, or the text placeholder [照片], and never for an image the character only considers, drafts, or plans but does not send. Classify the visible subject independently of whether a reference is configured: use subject="protagonist" whenever the protagonist is visibly present, including selfies, portraits, full-body images, or group photos containing the protagonist; use subject="other-person" when people are visible but the protagonist is not; use subject="non-person" for scenery, food, pets, objects, places, or protagonist point-of-view photos where the protagonist is not visible. A protagonist classification lets the host use characterReferenceImageEnabled when available, and reference identity must apply only to the protagonist in a group image. The prompt must describe only the requested visual, without instructions or claims that the image already exists. Otherwise omit imageGeneration.',
     refreshContinuity
       ? 'This turn requests a continuity refresh. After writing the script and permitted transport fields, include a compact continuity object: {"continuity":{"current":"...","next":["..."],"recent":["..."],"salient":["..."]}}. Keep each item short; current and recent describe only established past, next describes plans that have not happened, and salient contains only durable matters that may affect later behavior.'
       : 'Do not output a continuity field on this turn. Use the supplied continuitySnapshot as context only.',
@@ -1059,6 +1262,8 @@ export function toPromptPayload(request: NarrativeRequest) {
               ...(request.quotedMessages?.length ? { quotedMessages: request.quotedMessages } : {}),
             }
           : { type: 'due-intents' },
+    imageGenerationEnabled: request.imageGenerationEnabled === true,
+    characterReferenceImageEnabled: request.characterReferenceImageEnabled === true,
     groupContext: request.groupContext ? {
       ...request.groupContext,
       messages: request.groupContext.messages.map(message => ({

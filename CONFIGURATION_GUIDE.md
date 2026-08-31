@@ -4,6 +4,14 @@
 
 第一次安装先看 `BEGINNER_GUIDE.md`。本文件严格按照 Koishi Console 的显示顺序说明当前字段；旧版本已经移除或隐藏的字段集中列在末尾，不再混入正常配置流程。
 
+## 独立图片生成
+
+`model.imageGeneration` 与主聊天、压缩、Embedding、识图完全分开：它拥有自己的 `endpoint`、`apiKey`、`model`、`size`、`quality`、超时和扩展请求参数。默认关闭，也不会自动从任何其它模型连接复制密钥。
+
+智谱使用 `openai-images` 协议，默认 endpoint 为 `https://open.bigmodel.cn/api/paas/v4/images/generations`，模型可选 `cogview-3-flash`、`cogview-4` 或 `glm-image`。千问 `qwen-image-3.0` 选择 `dashscope-qwen-image`，endpoint 填 `https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`。配置、保存并重载后，在已授权私聊中使用 `interlude.image <图片描述>`；它每次只生成并发送一张图片。
+
+剧情生图会先把可见主体分为 `protagonist`、`other-person` 和 `non-person`。无论图片来自用户当轮索要、主角主动分享还是后台剧情投递，只要画面清晰出现主角本人（包括与他人合照），才会调用 `characterReference`；其他人物、风景、食物、宠物、物品，以及主角未入镜的第一视角照片都使用普通生图模型。合照中的参考身份仅约束主角，不应用到其他人物。
+
 ## Console 顺序
 
 1. `blindMode`：失明模式

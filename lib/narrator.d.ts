@@ -1,5 +1,5 @@
 import { Context } from 'koishi';
-import { AlterAnalysisDecision, AlterAnalysisRequest, AlterSystemConfig, ChatActionCapabilities, CompactionDecision, CompactionRequest, NarrativeDecision, NarrativeProvider, OverlayCompactionDecision, OverlayCompactionRequest, NarrativeCompactor, NarrativeEmbedder, NarrativeRequest, StickerCatalogEntry } from './types';
+import { AlterAnalysisDecision, AlterAnalysisRequest, AlterSystemConfig, ChatActionCapabilities, CompactionDecision, CompactionRequest, ImageSubject, NarrativeDecision, NarrativeProvider, OverlayCompactionDecision, OverlayCompactionRequest, NarrativeCompactor, NarrativeEmbedder, NarrativeRequest, StickerCatalogEntry } from './types';
 export { storyLocalTimeContext } from './time';
 export type ProviderResponseFormat = 'json-object' | 'prompt-only';
 export type ProviderStrategy = 'priority' | 'round-robin';
@@ -68,9 +68,45 @@ export interface ModelConfig {
     embedding?: EmbeddingConfig;
     /** OpenAI-compatible native image inputs for the current private-message turn. */
     vision?: VisionConfig;
+    /** Independently configured text-to-image endpoint. It never reuses the chat route implicitly. */
+    imageGeneration?: ImageGenerationConfig;
 }
 export interface VisionConfig {
     enabled: boolean;
+}
+/** A dedicated OpenAI Images-compatible route, separate from chat and embedding. */
+export interface ImageGenerationConfig {
+    enabled: boolean;
+    mode: ImageGenerationMode;
+    endpoint: string;
+    apiKey: string;
+    model: string;
+    size: string;
+    quality: string;
+    timeout: number;
+    maxPromptCharacters: number;
+    extraHeaders: string;
+    extraBody: string;
+    /** Optional portrait-consistency route for images that visibly depict the protagonist. */
+    characterReference?: CharacterReferenceImageConfig;
+}
+export interface CharacterReferenceImageConfig {
+    enabled: boolean;
+    /** Local image path, HTTPS URL, or data:image Base64 URI. */
+    source: string;
+    /** A DashScope image-edit model, normally qwen-image-edit. */
+    model: string;
+}
+export type ImageGenerationMode = 'openai-images' | 'dashscope-qwen-image';
+export interface GeneratedImage {
+    url: string;
+    revisedPrompt?: string;
+}
+export interface ImageGenerator {
+    generate(prompt: string, options?: {
+        subject?: ImageSubject;
+        characterAppearance?: string;
+    }): Promise<GeneratedImage>;
 }
 export interface ModelProfile {
     id: string;
@@ -129,6 +165,17 @@ export declare class SilentCompactor implements NarrativeCompactor {
 export declare class SilentEmbedder implements NarrativeEmbedder {
     embed(): Promise<number[]>;
 }
+/** Minimal OpenAI Images API client; compatible with Zhipu's /images/generations route. */
+export declare class OpenAICompatibleImageGenerator implements ImageGenerator {
+    private ctx;
+    private config;
+    constructor(ctx: Context, config: ImageGenerationConfig);
+    generate(prompt: string, options?: {
+        subject?: ImageSubject;
+        characterAppearance?: string;
+    }): Promise<GeneratedImage>;
+    private generateDashscopeQwenImage;
+}
 /**
  * Minimal OpenAI-compatible embedding client. It intentionally performs no
  * chat-provider failover: an embedding failure is non-fatal and the caller
@@ -172,6 +219,7 @@ export declare function configuredProviders(config: ModelConfig): ProviderConfig
 export declare function usesRemoteProviders(config: ModelConfig): boolean;
 export declare function createCompactor(ctx: Context, config: ModelConfig, silentLogs?: boolean): NarrativeCompactor;
 export declare function createEmbedder(ctx: Context, config: ModelConfig): NarrativeEmbedder;
+export declare function createImageGenerator(ctx: Context, config: ModelConfig): ImageGenerator;
 export declare function systemPrompt(phase: NarrativeRequest['phase'], mainPrompt: string | undefined, formatPrompt: string | undefined, fixedPrompt: string, baseStylePrompt: string, storyStylePrompt: string, refreshContinuity?: boolean, alterEnabled?: boolean, agencyEnabled?: boolean, perspectiveEnabled?: boolean, outputRecovery?: boolean, chatCapabilities?: ChatActionCapabilities, hasQuotedMessage?: boolean, stickerCatalog?: StickerCatalogEntry[]): string;
 export declare function storyStateForPrompt(state: NarrativeRequest['story']['state']): {
     settingOverlay: import("./types").StorySettingOverlay;
@@ -230,7 +278,7 @@ export declare function toPromptPayload(request: NarrativeRequest): {
     }[];
     durableFacts: {
         participantId: string;
-        scope: "character" | "world" | "relationship" | "event" | "promise";
+        scope: "character" | "relationship" | "world" | "event" | "promise";
         content: string;
         importance: number;
         confidence: number;
@@ -375,10 +423,12 @@ export declare function toPromptPayload(request: NarrativeRequest): {
         content: string;
         imageCount: number;
     };
+    imageGenerationEnabled: boolean;
+    characterReferenceImageEnabled: boolean;
     groupContext: {
         messages: {
             occurredAt: string;
-            direction: "user" | "character";
+            direction: "character" | "user";
             quote?: import("./types").QuotedMessageContext;
             senderId: string;
             senderName: string;

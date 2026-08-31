@@ -44,6 +44,16 @@ test('the fixed contract makes local endpoint time authoritative after long gaps
   assert.match(prompt, /continuity snapshot can be stale after reload or a long gap/i)
 })
 
+test('the narrative can request one actual image only through the structured delivery field', () => {
+  const prompt = systemPrompt('user-message', '', '', '', '', '', false, false)
+  assert.match(prompt, /imageGenerationEnabled/)
+  assert.match(prompt, /real paid image service/)
+  assert.match(prompt, /text placeholder \[照片\]/)
+  assert.match(prompt, /subject":"protagonist\|other-person\|non-person/)
+  assert.match(prompt, /group photos containing the protagonist/)
+  assert.match(prompt, /point-of-view photos where the protagonist is not visible/)
+})
+
 test('interrupted typing is context but never delivered speech', () => {
   const prompt = systemPrompt('user-message', '', '', '', '', '', false, false)
   assert.match(prompt, /interruptedOutgoingDrafts/)
