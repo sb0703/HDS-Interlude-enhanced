@@ -15,7 +15,7 @@ declare module '@koishijs/console' {
     }
 }
 export declare const name = "hds-interlude";
-export declare const version = "0.1.4-beta3";
+export declare const version = "0.1.4";
 export declare const reusable = true;
 export declare const inject: {
     required: string[];
