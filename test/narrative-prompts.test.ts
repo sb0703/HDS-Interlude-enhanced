@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { promptVisibleMessageContent, recentScriptOwnership, storyStateForPrompt, systemPrompt } from '../src/narrator'
+import { canonGuardPrompt, normalizeCanonReview, promptVisibleMessageContent, recentScriptOwnership, storyStateForPrompt, systemPrompt } from '../src/narrator'
 import { emptyStoryState } from '../src/types'
 
 test('Alter scoring is requested only while the system is enabled', () => {
@@ -42,6 +42,28 @@ test('the fixed contract makes local endpoint time authoritative after long gaps
   assert.match(prompt, /interval\.nowLocalContext/)
   assert.match(prompt, /16:00\/afternoon/)
   assert.match(prompt, /continuity snapshot can be stale after reload or a long gap/i)
+})
+
+test('the fixed contract keeps explicit workday schedules authoritative', () => {
+  const prompt = systemPrompt('user-message', '', '', '', '', '', false, false)
+  assert.match(prompt, /weekday, calendar and clock schedules/i)
+  assert.match(prompt, /lunch.*not the end of work/i)
+  assert.match(prompt, /repair the continuity/i)
+})
+
+test('the Canon guard produces strict bounded verdicts and recovery instructions', () => {
+  assert.match(canonGuardPrompt(), /pre-publication character-canon compliance gate/i)
+  assert.match(canonGuardPrompt(), /Lunch.*not the end of a workday/i)
+  assert.deepEqual(normalizeCanonReview({ compliant: true, conflicts: [] }), { compliant: true, conflicts: [] })
+  assert.deepEqual(normalizeCanonReview({ compliant: true, conflicts: ['11:20 下班与 18:30 下班冲突'] }), {
+    compliant: false,
+    conflicts: ['11:20 下班与 18:30 下班冲突'],
+  })
+  assert.throws(() => normalizeCanonReview({ conflicts: [] }), /omitted the compliant verdict/i)
+
+  const recovery = systemPrompt('user-message', '', '', '', '', '', false, false, false, false, false, undefined, false, undefined, ['恢复 18:30 正常下班'])
+  assert.match(recovery, /previous unpublished draft was rejected/i)
+  assert.match(recovery, /恢复 18:30 正常下班/)
 })
 
 test('the narrative can request one actual image only through the structured delivery field', () => {

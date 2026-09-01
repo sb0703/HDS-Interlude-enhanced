@@ -64,12 +64,22 @@ export interface ModelConfig {
     mainMaxTokens?: number;
     mainTimeout?: number;
     mainResponseFormat?: ProviderResponseFormat;
+    /** Optional second-pass guard that rejects drafts contradicting explicit character canon. */
+    canonGuard?: CanonGuardConfig;
     compaction?: CompactionConfig;
     embedding?: EmbeddingConfig;
     /** OpenAI-compatible native image inputs for the current private-message turn. */
     vision?: VisionConfig;
     /** Independently configured text-to-image endpoint. It never reuses the chat route implicitly. */
     imageGeneration?: ImageGenerationConfig;
+}
+export interface CanonGuardConfig {
+    enabled: boolean;
+    /** Number of unpublished rewrites allowed after a conflicting draft. */
+    maxRewriteAttempts: number;
+    /** Small bounded response budget for the compliance verdict. */
+    maxTokens: number;
+    timeout: number;
 }
 export interface VisionConfig {
     enabled: boolean;
@@ -154,6 +164,10 @@ export interface EmbeddingConfig {
     /** Number of legacy facts to vectorize in each background maintenance pass. */
     backfillBatchSize: number;
 }
+export interface CanonReview {
+    compliant: boolean;
+    conflicts: string[];
+}
 export declare class SilentNarrator implements NarrativeProvider {
     decide(): Promise<NarrativeDecision>;
 }
@@ -208,6 +222,7 @@ export declare class OpenAICompatibleNarrator implements NarrativeProvider {
     describeSticker(dataUri: string, mimeType: string, fileName: string, animated: boolean): Promise<StickerDescription | undefined>;
     private selectProviders;
     private requestProvider;
+    private requestCanonReview;
 }
 export declare function createNarrator(ctx: Context, config: ModelConfig, silentLogs?: boolean): NarrativeProvider;
 export declare function createStickerDescriber(ctx: Context, config: ModelConfig, silentLogs?: boolean): StickerDescriber;
@@ -220,7 +235,9 @@ export declare function usesRemoteProviders(config: ModelConfig): boolean;
 export declare function createCompactor(ctx: Context, config: ModelConfig, silentLogs?: boolean): NarrativeCompactor;
 export declare function createEmbedder(ctx: Context, config: ModelConfig): NarrativeEmbedder;
 export declare function createImageGenerator(ctx: Context, config: ModelConfig): ImageGenerator;
-export declare function systemPrompt(phase: NarrativeRequest['phase'], mainPrompt: string | undefined, formatPrompt: string | undefined, fixedPrompt: string, baseStylePrompt: string, storyStylePrompt: string, refreshContinuity?: boolean, alterEnabled?: boolean, agencyEnabled?: boolean, perspectiveEnabled?: boolean, outputRecovery?: boolean, chatCapabilities?: ChatActionCapabilities, hasQuotedMessage?: boolean, stickerCatalog?: StickerCatalogEntry[]): string;
+export declare function canonGuardPrompt(): string;
+export declare function normalizeCanonReview(value: unknown): CanonReview;
+export declare function systemPrompt(phase: NarrativeRequest['phase'], mainPrompt: string | undefined, formatPrompt: string | undefined, fixedPrompt: string, baseStylePrompt: string, storyStylePrompt: string, refreshContinuity?: boolean, alterEnabled?: boolean, agencyEnabled?: boolean, perspectiveEnabled?: boolean, outputRecovery?: boolean, chatCapabilities?: ChatActionCapabilities, hasQuotedMessage?: boolean, stickerCatalog?: StickerCatalogEntry[], canonRecovery?: string[]): string;
 export declare function storyStateForPrompt(state: NarrativeRequest['story']['state']): {
     settingOverlay: import("./types").StorySettingOverlay;
     activeSceneId?: number;
@@ -278,7 +295,7 @@ export declare function toPromptPayload(request: NarrativeRequest): {
     }[];
     durableFacts: {
         participantId: string;
-        scope: "character" | "relationship" | "world" | "event" | "promise";
+        scope: "promise" | "character" | "world" | "relationship" | "event";
         content: string;
         importance: number;
         confidence: number;

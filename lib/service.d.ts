@@ -54,6 +54,25 @@ export interface OneBotNapCatConfig {
     /** Optional SnowLuma record-to-text bridge for incoming private QQ voice messages. */
     voiceTranscription?: VoiceTranscriptionConfig;
 }
+/**
+ * A reusable HDSI plugin can host several QQ characters in one Koishi
+ * process. Keep their operational records in separate Logger categories so
+ * Console filtering never mixes one account's model calls with another's.
+ */
+export declare function interludeLoggerName(config: Pick<Config, 'onebot' | 'storyDefaults'>): string;
+export interface InterludeRuntimeLogEntry {
+    timestamp: number;
+    level: 'error' | 'warn' | 'info' | 'debug';
+    message: string;
+}
+export interface InterludeRuntimeLogProfile {
+    botId: string;
+    characterName: string;
+    logs: InterludeRuntimeLogEntry[];
+}
+/** Snapshot-only runtime diagnostics for the Console monitoring page. Logs
+ * remain in memory and are deliberately never written into story records. */
+export declare function listInterludeRuntimeLogs(): InterludeRuntimeLogProfile[];
 export interface VoiceTranscriptionConfig {
     enabled: boolean;
     timeoutMs: number;
@@ -257,6 +276,18 @@ export interface StoryDefaults {
     style: string;
     timezone: string;
 }
+export interface FullResetResult {
+    resetStoryId?: string;
+    stories: number;
+    participants: number;
+    records: number;
+}
+/**
+ * Whether a story belongs to this HDSI instance.  Multiple HDSI instances may
+ * share one Koishi database, but a OneBot account must never be advanced,
+ * compacted or reset by the instance configured for another account.
+ */
+export declare function storyBelongsToConfiguredBot(story: Pick<InterludeStory, 'platform' | 'selfId'>, onebot?: OneBotNapCatConfig): boolean;
 export interface LoggingConfig {
     level: 'silent' | 'error' | 'warn' | 'info' | 'debug';
     /** Controls how much normal operational activity is written at info level. */
@@ -358,11 +389,7 @@ export declare class InterludeService extends Service {
     /** Background life updates only require the bot account to remain enabled. */
     canHandleStory(story: InterludeStory): boolean;
     findStory(session: Session): Promise<any>;
-    /**
-     * Resolve and enforce the one global active story. The preferred id wins
-     * when present; otherwise the most recently updated row is retained and
-     * every other active row is archived immediately.
-     */
+    /** Resolve this instance's active story without touching stories owned by other bot accounts. */
     private getCanonicalStory;
     findParticipant(session: Session, story?: InterludeStory): Promise<any>;
     participants(storyId: string, includePaused?: boolean): Promise<any[]>;
@@ -426,8 +453,12 @@ export declare class InterludeService extends Service {
      * Console configuration, so an old profile cannot survive in later prompts.
      */
     purgeAllStoryData(storyId: string): Promise<void>;
-    /** Reset all platforms, retaining exactly one empty global canonical story. */
+    /** Reset only stories owned by this configured bot-account scope. */
     purgeAllData(preferredStoryId?: string): Promise<any>;
+    /** Console-facing full story reset. Provider credentials, OneBot and media
+     * configuration remain untouched; runtime Canon is rebuilt from the current
+     * storyDefaults and account presets. */
+    resetAllRuntimeData(): Promise<FullResetResult>;
     /** Delete one adapter/platform's records without touching other platforms. */
     purgePlatformData(platform: string): Promise<number>;
     /**

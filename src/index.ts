@@ -1,15 +1,63 @@
 import { Context, h, Schema, Session } from 'koishi'
+import { resolve } from 'node:path'
+import {} from '@koishijs/plugin-console'
 import { CompactionConfig, EmbeddingConfig, FailoverConfig, ImageGenerationConfig, ModelConfig, ProviderConfig, VisionConfig } from './narrator'
-import { BlindModeConfig, BrowserConfig, ChatActionsConfig, Config as InterludeConfig, extractSessionVoiceCount, GroupChatRule, InterludeService, LoggingConfig, MemoryConfig, OneBotAccountRule, OneBotNapCatConfig, RestWindow, RuntimeConfig, SharedStoryConfig, StickerLibraryConfig, StoryDefaults } from './service'
+import { BlindModeConfig, BrowserConfig, ChatActionsConfig, Config as InterludeConfig, extractSessionVoiceCount, FullResetResult, GroupChatRule, interludeLoggerName, InterludeRuntimeLogProfile, InterludeService, listInterludeRuntimeLogs, LoggingConfig, MemoryConfig, OneBotAccountRule, OneBotNapCatConfig, RestWindow, RuntimeConfig, SharedStoryConfig, StickerLibraryConfig, StoryDefaults } from './service'
 import { AgencyConfig, AlterSystemConfig, ChatReactionName, NativeFaceSemantic, StorySetting } from './types'
 import { HDS_INTERLUDE_VERSION } from './meta'
 import { GroupWillingnessConfig } from './group-willingness'
 
 declare module 'koishi' { interface Context { interlude: InterludeService } }
+declare module '@koishijs/console' {
+  interface Events {
+    'hds-interlude/reset-profiles'(): ResetProfile[]
+    'hds-interlude/reset-all'(request: ResetRequest): Promise<FullResetResult & { message: string }>
+    'hds-interlude/runtime-logs'(): InterludeRuntimeLogProfile[]
+  }
+}
 
 export const name = 'hds-interlude'
 export const version = HDS_INTERLUDE_VERSION
-export const inject = { required: ['database', 'http'], optional: ['puppeteer'] }
+// Each configured OneBot account owns an isolated story scope, so Koishi may
+// safely load this plugin more than once for multi-character deployments.
+export const reusable = true
+export const inject = { required: ['database', 'http'], optional: ['puppeteer', 'console'] }
+
+export const RESET_CONFIRMATION_PHRASE = '重置全部故事'
+
+interface ResetProfile {
+  botId: string
+  characterName: string
+}
+
+interface ResetRequest {
+  confirmation: string
+  botId: string
+}
+
+const resetTargets = new Map<string, { service: InterludeService, characterName: string }>()
+const commandRoots = new WeakSet<Context>()
+const consoleRoots = new WeakSet<Context>()
+
+export function resolveBotScopedTarget<T>(targets: ReadonlyMap<string, T>, selfId: unknown, fallback: T): T {
+  return targets.get(String(selfId ?? '').trim()) ?? fallback
+}
+
+export function sharedCommandContext(ctx: Context) {
+  return ctx.root
+}
+
+function commandService(session: Session, fallback: InterludeService) {
+  const targets = new Map([...resetTargets].map(([botId, target]) => [botId, target.service]))
+  return resolveBotScopedTarget(targets, session.selfId, fallback)
+}
+
+function configuredBotIds(config: InterludeConfig) {
+  return (config.onebot?.botAccounts ?? [])
+    .filter(account => account.enabled !== false)
+    .map(account => String(account.qq ?? '').trim())
+    .filter(Boolean)
+}
 
 const defaultProvider: ProviderConfig = {
   id: 'primary',
@@ -137,6 +185,12 @@ const Model: Schema<ModelConfig> = Schema.object({
   mainMaxTokens: Schema.natural().min(0).max(100_000).default(4096).description('主叙事最大输出 token 数。'),
   mainTimeout: Schema.natural().min(1_000).max(300_000).default(60_000).role('ms').description('主叙事请求超时，单位毫秒。'),
   mainResponseFormat: Schema.union(['json-object', 'prompt-only']).default('json-object').description('主叙事唯一的输出格式设置。支持 JSON mode 时选 json-object；不支持时改为 prompt-only。'),
+  canonGuard: Schema.object({
+    enabled: Schema.boolean().default(false).description('严格角色 Canon 守卫：每份草稿发送和落库前都进行独立一致性检查；冲突草稿会被丢弃并重写。会增加模型调用次数。'),
+    maxRewriteAttempts: Schema.natural().min(0).max(3).default(1).description('发现 Canon 冲突后允许的未发布重写次数；仍冲突则本轮失败，不发送也不写入剧情。'),
+    maxTokens: Schema.natural().min(128).max(4096).default(768).description('Canon 检查响应的最大 token 数。'),
+    timeout: Schema.natural().min(1000).max(120000).default(30000).role('ms').description('Canon 检查请求超时。'),
+  }).collapse(true).default({ enabled: false, maxRewriteAttempts: 1, maxTokens: 768, timeout: 30000 }).description('严格角色设定校验：适合身份、日程和行为边界必须稳定的角色。'),
   failover: Failover.default({ enabled: true, strategy: 'priority', maxAttemptsPerProvider: 1, cooldownMinutes: 5 }).description('主模型请求失败时的切换策略。'),
   mainPrompt: Schema.string().role('textarea').default('Continue the character-centered life script with grounded actions, motives, relationships, and ordinary time passing.').description('主叙事行为指令：定义模型如何连续写作、推进生活并处理外部事件。'),
   formatPrompt: Schema.string().role('textarea').default('').description('结构化输出补充说明；只能扩展固定协议，不能覆盖 JSON、时间和安全校验。'),
@@ -425,16 +479,55 @@ export const Config: Schema<InterludeConfig> = Schema.object({
 })
 
 export function apply(ctx: Context, config: InterludeConfig) {
-  const startupLogger = ctx.logger('hds-interlude')
+  const startupLogger = ctx.logger(interludeLoggerName(config))
   const blindModeEnabled = config.blindMode?.enabled === true || config.blackBox?.enabled === true
   if (!blindModeEnabled) startupLogger.info('plugin load started version=%s', HDS_INTERLUDE_VERSION)
   const service = new InterludeService(ctx, config)
+  const registeredBotIds = configuredBotIds(config)
+  for (const botId of registeredBotIds) resetTargets.set(botId, { service, characterName: config.storyDefaults.characterName })
+  ctx.on('dispose', () => {
+    for (const botId of registeredBotIds) {
+      if (resetTargets.get(botId)?.service === service) resetTargets.delete(botId)
+    }
+  })
+  const sharedContext = sharedCommandContext(ctx)
+  if (!consoleRoots.has(sharedContext)) {
+    consoleRoots.add(sharedContext)
+    sharedContext.inject(['console'], (consoleContext) => {
+      consoleContext.console.addEntry({
+        dev: resolve(__dirname, '../client/index.ts'),
+        prod: resolve(__dirname, '../dist'),
+      })
+      consoleContext.console.addListener('hds-interlude/reset-profiles', () => {
+        return [...resetTargets.entries()]
+          .map(([botId, target]) => ({ botId, characterName: target.characterName }))
+          .sort((left, right) => left.botId.localeCompare(right.botId))
+      }, { authority: 4 })
+      consoleContext.console.addListener('hds-interlude/runtime-logs', () => listInterludeRuntimeLogs(), { authority: 4 })
+      consoleContext.console.addListener('hds-interlude/reset-all', async (request) => {
+        if (request?.confirmation !== RESET_CONFIRMATION_PHRASE) throw new Error(`确认文字不正确，请输入“${RESET_CONFIRMATION_PHRASE}”。`)
+        const target = resetTargets.get(String(request?.botId ?? '').trim())
+        if (!target) throw new Error('未找到该机器人账号对应的 HDSI 角色实例。请刷新 Console 后重试。')
+        const result = await target.service.resetAllRuntimeData()
+        return {
+          ...result,
+          message: result.resetStoryId
+            ? '重置完成：所选角色的 Canon、Perspective、关系、世界、剧情、记忆、事实、意图和演化状态均已重建或清理。'
+            : '当前没有故事数据；无需重置。',
+        }
+      }, { authority: 4 })
+    })
+  }
   if (blindModeEnabled) {
     // Registered commands from every plugin reach this hook before their
     // action runs. Returning an empty fragment consumes them silently.
     ctx.on('command/before-execute', () => '')
   } else {
-    registerCommands(ctx, service)
+    const commandContext = sharedContext
+    if (!commandRoots.has(commandContext)) {
+      commandRoots.add(commandContext)
+      registerCommands(commandContext, service)
+    }
   }
 
   ctx.middleware(async (session, next) => {
@@ -459,11 +552,12 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.image <prompt:text>', '管理员：使用独立配置的文生图模型生成并发送一张图片')
     .action(async ({ session }, prompt) => {
-      if (!requireManager(service, session)) return '无权限：图片生成仅允许 HDSI 管理员执行。'
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '无权限：图片生成仅允许 HDSI 管理员执行。'
       const text = String(prompt ?? '').trim()
       if (!text) return '请提供图片描述，例如：interlude.image 雨夜便利店门口，一只橘猫趴在暖光下。'
       try {
-        const image = await service.generateImage(text)
+        const image = await target.generateImage(text)
         await session.send(h.image(image.url))
         return '图片已生成并发送。'
       } catch (error) {
@@ -472,8 +566,9 @@ function registerCommands(ctx: Context, service: InterludeService) {
     })
 
   const startStoryFromConsole = async (session: Session, legacyName?: string) => {
-    if (!requireManager(service, session)) return '无权限：手动启动共享主剧本需要 HDSI 管理员权限。'
-    const readiness = await service.storyStartReadiness(session)
+    const target = commandService(session, service)
+    if (!requireManager(target, session)) return '无权限：手动启动共享主剧本需要 HDSI 管理员权限。'
+    const readiness = await target.storyStartReadiness(session)
     if (readiness.existing) return `当前已有 ${readiness.existing.setting.character.name} 的活动主剧本；请使用 interlude.status 查看状态。`
     if (!readiness.ready) return formatStoryStartReadiness(readiness, 'Console 档案尚未适合启动')
     const preview = readiness.preview
@@ -491,13 +586,13 @@ function registerCommands(ctx: Context, service: InterludeService) {
       legacyNote,
     ].filter(Boolean).join('\n')
     if (!await askConfirmation(session, `${message}\n确认从此档案启动吗？(y/n)`)) return '操作已取消。'
-    const story = await service.createStory(session)
-    const participant = await service.findParticipant(session, story)
+    const story = await target.createStory(session)
+    const participant = await target.findParticipant(session, story)
     return `已从 Console 档案启动 ${story.setting.character.name} 的共享主剧本，并加入 ${participant?.displayName || session.userId}。`
   }
 
   ctx.command('interlude.doctor', '检查当前 Console 档案、权限与模型是否适合启动故事')
-    .action(async ({ session }) => formatStoryStartReadiness(await service.storyStartReadiness(session)))
+    .action(async ({ session }) => formatStoryStartReadiness(await commandService(session, service).storyStartReadiness(session)))
 
   ctx.command('interlude.story.start', '管理员：从当前 Console 档案手动启动第一份运行中故事')
     .action(async ({ session }) => startStoryFromConsole(session))
@@ -507,13 +602,14 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.setup <json:text>', '高级：用 JSON 单独修改当前故事设定；普通测试请优先在 Console 填 storyDefaults')
     .action(async ({ session }, json) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。请在 Console 的 sharedStory.managerAccounts 中添加此 QQ，或留空允许所有获授权账号。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。请在 Console 的 sharedStory.managerAccounts 中添加此 QQ，或留空允许所有获授权账号。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
       try {
         const patch = JSON.parse(json) as Partial<StorySetting>
         if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('设定必须是 JSON 对象。普通测试无需使用此命令。')
-        const updated = await service.updateSetting(story, patch)
+        const updated = await target.updateSetting(story, patch)
         return `已保存 ${updated.setting.character.name} 的当前故事设定。`
       } catch (error) {
         return `JSON 格式不正确：${(error as Error).message}`
@@ -522,41 +618,44 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.status', '查看当前故事是否启用、主角、游标和主动消息开关')
     .action(async ({ session }) => {
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
       return [
         `主角：${story.setting.character.name}`,
-        `关系人数：${(await service.participants(story.id)).length}`,
+        `关系人数：${(await target.participants(story.id)).length}`,
         `故事状态：${story.status}`,
         `已写到：${story.cursorAt.toISOString()}`,
-        `模型模式：${service.config.model.mode}`,
-        `允许主动可见消息：${service.config.runtime.allowProactiveMessages ? '开启' : '关闭'}`,
-        `Agency Window：${service.config.agency?.enabled === false ? '关闭' : '开启'}（${story.state.agencyWindow?.activityLoad || '尚未建立'}）`,
+        `模型模式：${target.config.model.mode}`,
+        `允许主动可见消息：${target.config.runtime.allowProactiveMessages ? '开启' : '关闭'}`,
+        `Agency Window：${target.config.agency?.enabled === false ? '关闭' : '开启'}（${story.state.agencyWindow?.activityLoad || '尚未建立'}）`,
       ].join('\n')
     })
 
   ctx.command('interlude.pause', '暂停当前故事的自动处理，不删除任何记录')
-    .action(async ({ session }) => changeStatus(service, session, 'paused'))
+    .action(async ({ session }) => changeStatus(commandService(session, service), session, 'paused'))
 
   ctx.command('interlude.resume', '恢复当前故事的自动处理')
-    .action(async ({ session }) => changeStatus(service, session, 'active'))
+    .action(async ({ session }) => changeStatus(commandService(session, service), session, 'active'))
 
   ctx.command('interlude.advance', '手动把故事补写到现在；用于测试自动生活推进')
     .action(async ({ session }) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const messages = await service.advanceStory(story)
-      await service.deliverMessages(story, messages, session)
+      const messages = await target.advanceStory(story)
+      await target.deliverMessages(story, messages, session)
       return messages.length ? '剧本已补写到现在，并已发送其中已经发生的可见角色消息。' : '剧本已补写到现在；这次没有发生可见角色消息。'
     })
 
   ctx.command('interlude.timeline [limit:number]', '查看最近剧本记录；limit 为条数，默认 10')
     .action(async ({ session }, limit = 10) => {
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const participant = await service.findParticipant(session, story)
-      const entries = (await service.recentEntries(story.id, Math.max(1, Math.min(limit * 3, 90))))
+      const participant = await target.findParticipant(session, story)
+      const entries = (await target.recentEntries(story.id, Math.max(1, Math.min(limit * 3, 90))))
         .filter(entry => !entry.participantId || entry.participantId === participant?.id)
         .slice(-Math.max(1, Math.min(limit, 30)))
       if (!entries.length) return '当前故事还没有剧本记录。'
@@ -565,21 +664,23 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.memory [limit:number]', '查看主模型提取出的耐久记忆；limit 为条数，默认 10')
     .action(async ({ session }, limit = 10) => {
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const participant = await service.findParticipant(session, story)
-      const memories = await service.memories(story.id, Math.max(1, Math.min(limit, 30)), participant?.id)
+      const participant = await target.findParticipant(session, story)
+      const memories = await target.memories(story.id, Math.max(1, Math.min(limit, 30)), participant?.id)
       if (!memories.length) return '暂时还没有提取出耐久记忆；多进行一些对话并等待后台整理后再看。'
       return memories.map(memory => `[${memory.category}/${memory.importance.toFixed(2)}] ${memory.content}`).join('\n')
     })
 
   ctx.command('interlude.context', '查看场景摘要、剧情弧线、人物变化覆写和长期事实')
     .action(async ({ session }) => {
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const participant = await service.findParticipant(session, story)
+      const participant = await target.findParticipant(session, story)
       const [scene, arc, facts] = await Promise.all([
-        service.activeScene(story.id), service.activeArc(story.id), service.facts(story.id, 8, '', participant?.id),
+        target.activeScene(story.id), target.activeArc(story.id), target.facts(story.id, 8, '', participant?.id),
       ])
       return [
         `场景引子：${scene?.hook || '尚未整理'}`,
@@ -596,64 +697,71 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.compact', '立即整理一次当前故事的旧剧本；用于测试记忆压缩')
     .action(async ({ session }) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const compacted = await service.compactStory(story)
+      const compacted = await target.compactStory(story)
       return compacted ? '已完成一次连续性记忆整理。' : '当前还没有达到需要整理的剧本量。'
     })
 
   ctx.command('interlude.script [limit:number]', '管理员：查看当前主剧本的最近原始条目，默认 20 条')
     .action(async ({ session }, limit = 20) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const entries = await service.recentEntries(story.id, Math.max(1, Math.min(limit, 50)))
+      const entries = await target.recentEntries(story.id, Math.max(1, Math.min(limit, 50)))
       if (!entries.length) return '当前主剧本还没有原始条目。'
       return entries.map(entry => `#${entry.id} [${entry.occurredAt.toISOString()}] ${entry.actor}/${entry.kind}${entry.participantId ? `/${entry.participantId}` : ''}\n${entry.content}`).join('\n\n')
     })
 
   ctx.command('interlude.script.note <content:text>', '管理员：向剧本写入一条人工注记，不伪装成模型输出')
     .action(async ({ session }, content) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      return await service.addAdminScriptNote(story, content) ? '已写入管理员注记，后续压缩会将其纳入连续性。' : '注记为空，未写入。'
+      return await target.addAdminScriptNote(story, content) ? '已写入管理员注记，后续压缩会将其纳入连续性。' : '注记为空，未写入。'
     })
 
   ctx.command('interlude.memory.facts [limit:number]', '管理员：列出长期事实及其编号，默认 20 条')
     .action(async ({ session }, limit = 20) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const facts = await service.adminFacts(story.id, limit)
+      const facts = await target.adminFacts(story.id, limit)
       if (!facts.length) return '当前没有有效的长期事实。'
       return facts.map(fact => `#${fact.id} [${fact.scope}] 重要度=${fact.importance.toFixed(2)} 置信度=${fact.confidence.toFixed(2)} 未解决=${fact.unresolved}\n${fact.content}`).join('\n\n')
     })
 
   ctx.command('interlude.memory.add <scope:string> <content:text>', '管理员：手动添加长期事实；scope 为 character/world/relationship/event/promise')
     .action(async ({ session }, scope, content) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
       if (!isFactScope(scope)) return 'scope 必须是 character、world、relationship、event 或 promise。'
-      const story = await requireStory(service, session)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      return await service.addAdminFact(story, scope, content) ? '已添加高置信度长期事实。' : '事实内容为空，未添加。'
+      return await target.addAdminFact(story, scope, content) ? '已添加高置信度长期事实。' : '事实内容为空，未添加。'
     })
 
   ctx.command('interlude.memory.forget <id:number>', '管理员：将指定长期事实标记为已失效，可审计且不会物理删除')
     .action(async ({ session }, id) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      return await service.forgetAdminFact(story.id, id) ? `长期事实 #${id} 已标记为失效。` : `未找到有效的长期事实 #${id}。`
+      return await target.forgetAdminFact(story.id, id) ? `长期事实 #${id} 已标记为失效。` : `未找到有效的长期事实 #${id}。`
     })
 
   ctx.command('interlude.memory.intents [limit:number]', '管理员：查看等待中的计划、提醒、承诺与剧情余波')
     .action(async ({ session }, limit = 20) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const intents = await service.adminPendingIntents(story.id, limit)
+      const intents = await target.adminPendingIntents(story.id, limit)
       if (!intents.length) return '当前没有等待中的计划、提醒、承诺或剧情余波。'
       return intents.map(intent => {
         const active = intent.type === 'active-consequence' && intent.payload?.lifecycle === 'active'
@@ -666,49 +774,54 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.memory.cancel <id:number>', '管理员：取消指定的等待中意图或延迟消息')
     .action(async ({ session }, id) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      return await service.cancelAdminIntent(story.id, id) ? `意图 #${id} 已取消。` : `未找到等待中的意图 #${id}。`
+      return await target.cancelAdminIntent(story.id, id) ? `意图 #${id} 已取消。` : `未找到等待中的意图 #${id}。`
     })
 
   ctx.command('interlude.memory.patches [limit:number]', '管理员：查看人物、关系和世界设定的演化提案')
     .action(async ({ session }, limit = 20) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const patches = await service.adminStatePatches(story.id, limit)
+      const patches = await target.adminStatePatches(story.id, limit)
       if (!patches.length) return '当前没有设定演化提案。'
       return patches.map(patch => `#${patch.id} [${patch.status}/${patch.target}/${patch.impact}] 置信度=${patch.confidence.toFixed(2)}\n提案：${patch.proposedValue}\n证据：${patch.evidence}`).join('\n\n')
     })
 
   ctx.command('interlude.memory.reject <id:number>', '管理员：拒绝一条尚未应用的设定演化提案')
     .action(async ({ session }, id) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      return await service.rejectAdminStatePatch(story.id, id) ? `设定演化提案 #${id} 已拒绝。` : `未找到待审核的设定演化提案 #${id}。`
+      return await target.rejectAdminStatePatch(story.id, id) ? `设定演化提案 #${id} 已拒绝。` : `未找到待审核的设定演化提案 #${id}。`
     })
 
   ctx.command('interlude.overlay.clear <target:string>', '管理员：只清理指定部分的设定演化 overlay，不删除剧本和记忆；执行前会询问 y/n')
     .action(async ({ session }, target) => {
-      if (!requireManager(service, session)) return '无权限：当前账号不是 HDSI 管理员。'
+      const routed = commandService(session, service)
+      if (!requireManager(routed, session)) return '无权限：当前账号不是 HDSI 管理员。'
       const normalized = String(target || '').trim().toLowerCase() as 'character' | 'perspective' | 'relationship' | 'world' | 'all'
       if (!['character', 'perspective', 'relationship', 'world', 'all'].includes(normalized)) return 'target 必须是 character、perspective、relationship、world 或 all。'
       if (!await askConfirmation(session, `即将清理 ${normalized} overlay；剧本和记忆不会删除。确认执行吗？(y/n)`)) return '操作已取消。'
-      const story = await requireStory(service, session)
+      const story = await requireStory(routed, session)
       if (typeof story === 'string') return story
-      const result = await service.clearSettingOverlay(story, normalized)
+      const result = await routed.clearSettingOverlay(story, normalized)
       const participantNote = normalized === 'relationship' || normalized === 'all' ? `，已清理 ${result.participantCount} 个参与者关系 overlay` : ''
       return `已清理 ${normalized} overlay${participantNote}；剧本、长期事实和普通记忆均未删除。`
     })
 
   ctx.command('interlude.overlay.status', '管理员：查看当前 overlay、待积累提案和压缩归档状态')
     .action(async ({ session }) => {
-      if (!requireManager(service, session)) return '无权限：当前账号不是 HDSI 管理员。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '无权限：当前账号不是 HDSI 管理员。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const status = await service.adminOverlayStatus(story.id)
+      const status = await target.adminOverlayStatus(story.id)
       const overlay = JSON.stringify(status.state)
       return [
         `当前全局 overlay：${overlay === '{}' ? '空' : overlay}`,
@@ -722,38 +835,42 @@ function registerCommands(ctx: Context, service: InterludeService) {
 
   ctx.command('interlude.overlay.compact', '管理员：只合并和压缩已应用的 overlay，不整理普通剧本记忆')
     .action(async ({ session }) => {
-      if (!requireManager(service, session)) return '无权限：当前账号不是 HDSI 管理员。'
-      const story = await requireStory(service, session)
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '无权限：当前账号不是 HDSI 管理员。'
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      const changed = await service.compactOverlay(story)
+      const changed = await target.compactOverlay(story)
       return changed ? 'overlay 合并和压缩完成。' : '没有需要合并或压缩的 overlay。'
     })
 
   ctx.command('interlude.database.clear', '管理员：清空 HDSI 自有 SQLite 数据表；不会删除 Koishi 用户和其它插件数据；执行前会询问 y/n')
     .action(async ({ session }) => {
-      if (!requireManager(service, session)) return '无权限：当前账号不是 HDSI 管理员。'
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '无权限：当前账号不是 HDSI 管理员。'
       if (!await askConfirmation(session, '即将清空 HDSI 自有数据库，剧本、记忆和状态记录都会删除。确认执行吗？(y/n)')) return '操作已取消。'
-      const result = await service.clearDatabase()
+      const result = await target.clearDatabase()
       return `HDSI 数据库清空完成：处理 ${result.removed} 条记录${result.logicallyCleared ? `，其中 ${result.logicallyCleared} 条因 SQLite 锁定改为逻辑清空` : ''}。`
     })
 
   ctx.command('interlude.purge.all', '管理员：彻底重置所有平台的剧本、记忆与 Canon；执行前会询问 y/n')
     .action(async ({ session }) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
       if (!await askConfirmation(session, '即将删除所有平台的剧本、记忆、事实、意图和状态。确认执行吗？(y/n)')) return '操作已取消。'
-      const story = await requireStory(service, session)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      await service.purgeAllData(story.id)
+      await target.purgeAllData(story.id)
       return '已彻底重置所有平台：旧剧本、场景摘要、剧情弧线、长期事实、记忆、意图、状态演化和参与者关系状态均已清除；当前故事保留为空白的全局主剧本，Canon 已按当前 Console 配置重建。'
     })
 
   ctx.command('interlude.purge.platform <platform:string>', '管理员：删除指定平台的全部剧本和记忆；例如 sandbox 或 onebot；执行前会询问 y/n')
     .action(async ({ session }, platform) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
       if (!await askConfirmation(session, `即将删除平台 ${platform} 的全部剧本和记忆。确认执行吗？(y/n)`)) return '操作已取消。'
       const normalized = String(platform ?? '').trim().toLowerCase()
       if (!normalized) return '请填写平台名，例如 sandbox 或 onebot。'
-      const count = await service.purgePlatformData(normalized)
+      const count = await target.purgePlatformData(normalized)
       return count
         ? `已清空并归档平台 ${normalized} 的 ${count} 部剧本；其它平台不受影响。`
         : `没有找到平台 ${normalized} 的 HDSI 剧本。`
@@ -762,14 +879,15 @@ function registerCommands(ctx: Context, service: InterludeService) {
   // `text` 是 Koishi 的贪婪参数类型，会吞掉后续的结束时间；这里必须使用普通 string。
   ctx.command('interlude.purge.range <from:string> <to:string>', '管理员：删除时间范围内的剧本和关联记忆；时间使用 ISO-8601；执行前会询问 y/n')
     .action(async ({ session }, fromText, toText) => {
-      if (!requireManager(service, session)) return '当前 QQ 没有共享主剧本的管理权限。'
+      const target = commandService(session, service)
+      if (!requireManager(target, session)) return '当前 QQ 没有共享主剧本的管理权限。'
       const from = new Date(String(fromText ?? '').trim())
       const to = new Date(String(toText ?? '').trim())
       if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from > to) return '时间范围无效，请使用 ISO-8601，例如 2026-08-01T00:00:00+08:00。'
       if (!await askConfirmation(session, `即将删除 ${from.toISOString()} 至 ${to.toISOString()} 范围内的剧本和关联记忆。确认执行吗？(y/n)`)) return '操作已取消。'
-      const story = await requireStory(service, session)
+      const story = await requireStory(target, session)
       if (typeof story === 'string') return story
-      await service.purgeStoryRange(story.id, from, to)
+      await target.purgeStoryRange(story.id, from, to)
       return `已删除 ${from.toISOString()} 至 ${to.toISOString()} 范围内的剧本和关联记忆；Canon 与参与者身份未删除。`
     })
 }

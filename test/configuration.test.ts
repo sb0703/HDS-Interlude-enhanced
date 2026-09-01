@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { Config, version } from '../src/index'
-import { hasRequiredNarrativeScript, normalizeGroupVisibleReply, resolveBlindModeConfig, visibleReplyMode } from '../src/service'
+import { Context } from 'koishi'
+import { Config, inject, RESET_CONFIRMATION_PHRASE, resolveBotScopedTarget, reusable, sharedCommandContext, version } from '../src/index'
+import { hasRequiredNarrativeScript, interludeLoggerName, normalizeGroupVisibleReply, resolveBlindModeConfig, storyBelongsToConfiguredBot, visibleReplyMode } from '../src/service'
 import { configuredProviders, ZHIPU_FIRST_VISIBLE_TOKEN_TIMEOUT } from '../src/narrator'
 import { HDS_INTERLUDE_VERSION } from '../src/meta'
 
@@ -10,6 +11,55 @@ test('Console sections follow the documented setup order', () => {
     'blindMode', 'storyDefaults', 'model', 'onebot', 'chatActions', 'stickers', 'sharedStory', 'runtime',
     'agency', 'memory', 'alterSystem', 'browser', 'logging',
   ])
+})
+
+test('Console reset entry is optional and requires an explicit destructive confirmation phrase', () => {
+  assert.ok(inject.optional.includes('console'))
+  assert.equal(RESET_CONFIRMATION_PHRASE, '重置全部故事')
+})
+
+test('multiple HDSI instances only own their configured OneBot stories', () => {
+  const onebot = {
+    enabled: true,
+    botAccounts: [{ qq: '10001', label: '角色甲', enabled: true }],
+    userAccounts: [],
+    ignoreSelfMessages: true,
+  }
+  assert.equal(storyBelongsToConfiguredBot({ platform: 'onebot', selfId: '10001' }, onebot), true)
+  assert.equal(storyBelongsToConfiguredBot({ platform: 'onebot', selfId: '10002' }, onebot), false)
+  assert.equal(storyBelongsToConfiguredBot({ platform: 'sandbox', selfId: 'bot' }, onebot), false)
+})
+
+test('HDSI declares itself reusable for isolated multi-character deployments', () => {
+  assert.equal(reusable, true)
+})
+
+test('shared command names resolve to the HDSI instance owned by the receiving bot', () => {
+  const fallback = { character: 'fallback' }
+  const targets = new Map([
+    ['90000000001', { character: '沈既明' }],
+    ['90000000002', { character: '周旭川' }],
+  ])
+  assert.equal(resolveBotScopedTarget(targets, '90000000001', fallback).character, '沈既明')
+  assert.equal(resolveBotScopedTarget(targets, ' 90000000002 ', fallback).character, '周旭川')
+  assert.equal(resolveBotScopedTarget(targets, 'unknown', fallback), fallback)
+})
+
+test('reusable HDSI instances register shared commands on the unfiltered root context', () => {
+  const root = new Context()
+  const botScoped = root.self('90000000002')
+  assert.equal(sharedCommandContext(botScoped), root)
+})
+
+test('each HDSI instance emits logs under its own bot account category', () => {
+  assert.equal(interludeLoggerName({
+    onebot: { enabled: true, botAccounts: [{ qq: '90000000002', label: '周', enabled: true }], userAccounts: [] },
+    storyDefaults: { characterName: '周旭川' },
+  } as any), 'hds-interlude.onebot.90000000002')
+  assert.equal(interludeLoggerName({
+    onebot: { enabled: true, botAccounts: [], userAccounts: [] },
+    storyDefaults: { characterName: '未配置角色' },
+  } as any), 'hds-interlude.character.未配置角色')
 })
 
 test('chat actions are opt-in and platform-scoped', () => {

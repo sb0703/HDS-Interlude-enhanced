@@ -95,6 +95,61 @@ export interface OneBotNapCatConfig {
   voiceTranscription?: VoiceTranscriptionConfig
 }
 
+/**
+ * A reusable HDSI plugin can host several QQ characters in one Koishi
+ * process. Keep their operational records in separate Logger categories so
+ * Console filtering never mixes one account's model calls with another's.
+ */
+export function interludeLoggerName(config: Pick<Config, 'onebot' | 'storyDefaults'>) {
+  const accounts = (config.onebot?.botAccounts ?? [])
+    .filter(account => account.enabled !== false)
+    .map(account => normalizeAccountId(account.qq))
+    .filter(Boolean)
+  if (accounts.length) return `hds-interlude.onebot.${accounts.join('.')}`
+  const character = config.storyDefaults?.characterName?.trim().replace(/\s+/g, '-')
+  return character ? `hds-interlude.character.${character}` : 'hds-interlude.unconfigured'
+}
+
+export interface InterludeRuntimeLogEntry {
+  timestamp: number
+  level: 'error' | 'warn' | 'info' | 'debug'
+  message: string
+}
+
+export interface InterludeRuntimeLogProfile {
+  botId: string
+  characterName: string
+  logs: InterludeRuntimeLogEntry[]
+}
+
+const RUNTIME_LOG_LIMIT = 240
+const runtimeLogProfiles = new Map<string, InterludeRuntimeLogProfile>()
+
+/** Snapshot-only runtime diagnostics for the Console monitoring page. Logs
+ * remain in memory and are deliberately never written into story records. */
+export function listInterludeRuntimeLogs(): InterludeRuntimeLogProfile[] {
+  return [...runtimeLogProfiles.values()]
+    .map(profile => ({ ...profile, logs: profile.logs.map(log => ({ ...log })) }))
+    .sort((left, right) => left.characterName.localeCompare(right.characterName) || left.botId.localeCompare(right.botId))
+}
+
+function runtimeLogProfile(config: Pick<Config, 'onebot' | 'storyDefaults'>) {
+  const botId = (config.onebot?.botAccounts ?? [])
+    .filter(account => account.enabled !== false)
+    .map(account => normalizeAccountId(account.qq))
+    .find(Boolean) || 'unconfigured'
+  return { botId, characterName: config.storyDefaults?.characterName?.trim() || '未命名角色' }
+}
+
+function recordInterludeRuntimeLog(config: Pick<Config, 'onebot' | 'storyDefaults'>, level: InterludeRuntimeLogEntry['level'], message: string) {
+  const identity = runtimeLogProfile(config)
+  const current = runtimeLogProfiles.get(identity.botId) ?? { ...identity, logs: [] }
+  current.characterName = identity.characterName
+  current.logs.push({ timestamp: Date.now(), level, message })
+  if (current.logs.length > RUNTIME_LOG_LIMIT) current.logs.splice(0, current.logs.length - RUNTIME_LOG_LIMIT)
+  runtimeLogProfiles.set(identity.botId, current)
+}
+
 export interface VoiceTranscriptionConfig {
   enabled: boolean
   timeoutMs: number
@@ -360,6 +415,28 @@ export interface StoryDefaults {
   timezone: string
 }
 
+export interface FullResetResult {
+  resetStoryId?: string
+  stories: number
+  participants: number
+  records: number
+}
+
+/**
+ * Whether a story belongs to this HDSI instance.  Multiple HDSI instances may
+ * share one Koishi database, but a OneBot account must never be advanced,
+ * compacted or reset by the instance configured for another account.
+ */
+export function storyBelongsToConfiguredBot(story: Pick<InterludeStory, 'platform' | 'selfId'>, onebot?: OneBotNapCatConfig): boolean {
+  if (!onebot?.enabled) return true
+  const enabledBots = (onebot.botAccounts ?? [])
+    .filter(account => account.enabled !== false)
+    .map(account => normalizeAccountId(account.qq))
+    .filter(Boolean)
+  if (!isOneBotPlatform(story.platform)) return enabledBots.length === 0
+  return enabledBots.includes(normalizeAccountId(story.selfId))
+}
+
 export interface LoggingConfig {
   level: 'silent' | 'error' | 'warn' | 'info' | 'debug'
   /** Controls how much normal operational activity is written at info level. */
@@ -441,8 +518,14 @@ export class InterludeService extends Service {
   private blindModeHealthIssue = false
 
   constructor(ctx: Context, public config: Config) {
-    super(ctx, 'interlude')
-    this.serviceLogger = ctx.logger('hds-interlude')
+    // HDSI is reusable: Console may run one instance for each QQ/character.
+    // Cordis services are global unless their name is isolated, so a second
+    // instance used to fail during ready with "service interlude has been
+    // registered".  Keep the implementation service local to this plugin
+    // instance; all public commands and middleware already close over the
+    // concrete service object created by apply().
+    super(ctx.isolate('interlude'), 'interlude')
+    this.serviceLogger = ctx.logger(interludeLoggerName(config))
     registerTables(ctx)
     this.narrator = createNarrator(ctx, config.model, this.blindModeConfig.enabled)
     this.compactor = createCompactor(ctx, config.model, this.blindModeConfig.enabled)
@@ -547,16 +630,14 @@ export class InterludeService extends Service {
 
   /** Background life updates only require the bot account to remain enabled. */
   canHandleStory(story: InterludeStory): boolean {
-    if (!isOneBotPlatform(story.platform)) return true
-    const config = this.config.onebot
-    if (!config?.enabled) return true
-    return isEnabledAccount(config.botAccounts, normalizeAccountId(story.selfId))
+    return storyBelongsToConfiguredBot(story, this.config.onebot)
   }
 
   async findStory(session: Session) {
     if (this.sharedStoryConfig.enabled) {
-      // Shared mode deliberately has one canonical active story in the whole
-      // Koishi instance. Sandbox and OneBot must not run parallel lives.
+      // Each configured bot account owns one canonical story. Multiple HDSI
+      // instances can therefore share a database without stealing one
+      // another's active Canon, memories, or background scheduler.
       const existing = await this.getCanonicalStory(storyIdForCharacter(session.platform, session.selfId))
       if (existing) {
         const sharedId = storyIdForCharacter(session.platform, session.selfId)
@@ -577,15 +658,11 @@ export class InterludeService extends Service {
     return legacy ? this.migrateLegacyStory(legacy, session) : undefined
   }
 
-  /**
-   * Resolve and enforce the one global active story. The preferred id wins
-   * when present; otherwise the most recently updated row is retained and
-   * every other active row is archived immediately.
-   */
+  /** Resolve this instance's active story without touching stories owned by other bot accounts. */
   private async getCanonicalStory(preferredId?: string) {
-    const active = await this.dbGet('interlude_story', { status: 'active' }, {
+    const active = (await this.dbGet('interlude_story', { status: 'active' }, {
       sort: { updatedAt: 'desc' },
-    })
+    })).filter(story => this.canHandleStory(story))
     if (!active.length) return undefined
     const canonical = (preferredId && active.find(story => story.id === preferredId))
       ?? active.find(story => story.id.startsWith('character:'))
@@ -946,25 +1023,56 @@ export class InterludeService extends Service {
     await this.ensureContinuity({ ...story, setting, state: emptyStoryState(), cursorAt: now }, now)
   }
 
-  /** Reset all platforms, retaining exactly one empty global canonical story. */
+  /** Reset only stories owned by this configured bot-account scope. */
   async purgeAllData(preferredStoryId?: string) {
-    const all = await this.dbGet('interlude_story', {}, { sort: { updatedAt: 'desc' } })
+    const all = (await this.dbGet('interlude_story', {}, { sort: { updatedAt: 'desc' } }))
+      .filter(story => this.canHandleStory(story))
     const active = all.filter(story => story.status === 'active')
-    if (!active.length) return undefined
-    const canonical = (preferredStoryId && active.find(story => story.id === preferredStoryId)) ?? active[0]
+    const canonical = (preferredStoryId && all.find(story => story.id === preferredStoryId)) ?? active[0] ?? all[0]
+    if (!canonical) return undefined
     for (const story of all) await this.purgeAllStoryData(story.id)
     const now = new Date()
     for (const story of all) {
-      if (story.id === canonical.id) continue
+      if (story.id === canonical.id) {
+        await this.dbSet('interlude_story', { id: story.id }, { status: 'active', updatedAt: now })
+        continue
+      }
       await this.dbSet('interlude_story', { id: story.id }, { status: 'archived', updatedAt: now })
     }
     return canonical.id
   }
 
+  /** Console-facing full story reset. Provider credentials, OneBot and media
+   * configuration remain untouched; runtime Canon is rebuilt from the current
+   * storyDefaults and account presets. */
+  async resetAllRuntimeData(): Promise<FullResetResult> {
+    if (this.databaseResetting) throw new Error('HDSI 重置已经在进行中。')
+    this.databaseResetting = true
+    this.invalidateBufferedNarratives()
+    try {
+      const tables = [
+        'interlude_script_entry', 'interlude_memory', 'interlude_intent',
+        'interlude_scene', 'interlude_arc', 'interlude_fact', 'interlude_state_patch',
+        'interlude_overlay_snapshot', 'interlude_web_observation',
+      ] as const
+      const stories = (await this.dbGet('interlude_story', {})).filter(story => this.canHandleStory(story))
+      const storyIds = new Set(stories.map(story => story.id))
+      const participants = (await this.dbGet('interlude_participant', {})).filter(row => storyIds.has(row.storyId))
+      let records = stories.length + participants.length
+      for (const table of tables) {
+        records += (await this.dbGet(table, {})).filter(row => storyIds.has(row.storyId)).length
+      }
+      const resetStoryId = await this.purgeAllData()
+      return { resetStoryId, stories: stories.length, participants: participants.length, records }
+    } finally {
+      this.databaseResetting = false
+    }
+  }
+
   /** Delete one adapter/platform's records without touching other platforms. */
   async purgePlatformData(platform: string) {
     const all = await this.dbGet('interlude_story', {}, { sort: { updatedAt: 'desc' } })
-    const targets = all.filter(story => samePlatformFamily(story.platform, platform))
+    const targets = all.filter(story => this.canHandleStory(story) && samePlatformFamily(story.platform, platform))
     for (const story of targets) {
       await this.purgeAllStoryData(story.id)
       await this.dbSet('interlude_story', { id: story.id }, { status: 'archived', updatedAt: new Date() })
@@ -4469,6 +4577,7 @@ export class InterludeService extends Service {
   }
 
   private emitLog(level: 'error' | 'warn' | 'info' | 'debug', output: string) {
+    recordInterludeRuntimeLog(this.config, level, output)
     if (level === 'error') this.serviceLogger.error(output)
     else if (level === 'warn') this.serviceLogger.warn(output)
     else if (level === 'info') this.serviceLogger.info(output)

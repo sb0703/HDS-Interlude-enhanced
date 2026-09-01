@@ -514,6 +514,8 @@ export interface NarrativeRequest {
     refreshContinuity?: boolean;
     /** A prior unpublished draft omitted its required visible-reply structure. */
     outputRecovery?: boolean;
+    /** Canon conflicts found in an unpublished draft; the next draft must repair them. */
+    canonRecovery?: string[];
     story: InterludeStory;
     from: Date;
     now: Date;
