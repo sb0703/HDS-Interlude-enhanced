@@ -39,11 +39,7 @@ export function storyLocalTimeContext(value: Date, timezone: string) {
       : hour >= 18 && hour < 22 ? 'evening'
         : 'night'
   const periodZh = ({ morning: '上午', afternoon: '下午', evening: '傍晚/晚上', night: '夜间' } as const)[period]
-  const daylightExpectation = period === 'morning' || period === 'afternoon'
-    ? 'normally daylight unless current weather, season, or setting explicitly says otherwise'
-    : period === 'evening'
-      ? 'transitioning toward darkness; use the established season and setting'
-      : 'normally dark outside unless the setting explicitly says otherwise'
+  const daylightExpectation = 'unknown from clock alone; use the established location, season, weather and world, not a universal daylight timetable'
   const date = `${part('year')}-${part('month')}-${part('day')}`
   const time = `${part('hour')}:${part('minute')}:${part('second')}`
   return {

@@ -29,9 +29,9 @@ function request(phase: NarrativeRequest['phase']): NarrativeRequest {
   }
 }
 
-test('scene presence accepts explicit arrival/departure evidence and rejects inferred departures', () => {
+test('scene presence normalization requires an exact subject-bearing quote, not scene keywords', () => {
   const departure = normalizeScenePresenceDrafts([{
-    name: '希绘', status: 'off-scene', basis: '希绘在电梯口与水濑道别后回家。', sourceEntryIds: [1],
+    name: '希绘', status: 'off-scene', basis: '希绘在电梯口与水濑道别后回家。', evidenceQuote: '希绘在电梯口与水濑道别后回家。', sourceEntryIds: [1],
   }], [entry(1, '希绘在电梯口与水濑道别后回家。')], now)
   assert.equal(departure[0]?.status, 'off-scene')
 

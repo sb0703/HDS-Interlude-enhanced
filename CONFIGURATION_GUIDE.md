@@ -1,6 +1,6 @@
 # HDS Interlude 配置指南
 
-适用版本：`0.1.4`
+适用版本：`0.1.5-beta8-m6.custom.4`
 
 第一次安装先看 `BEGINNER_GUIDE.md`。本文件严格按照 Koishi Console 的显示顺序说明当前字段；旧版本已经移除或隐藏的字段集中列在末尾，不再混入正常配置流程。
 

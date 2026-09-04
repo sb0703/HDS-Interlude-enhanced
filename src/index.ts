@@ -2,8 +2,8 @@ import { Context, h, Schema, Session } from 'koishi'
 import { resolve } from 'node:path'
 import {} from '@koishijs/plugin-console'
 import { CompactionConfig, EmbeddingConfig, FailoverConfig, ImageGenerationConfig, ModelConfig, ProviderConfig, VisionConfig } from './narrator'
-import { BlindModeConfig, BrowserConfig, ChatActionsConfig, Config as InterludeConfig, extractSessionVoiceCount, FullResetResult, GroupChatRule, interludeLoggerName, InterludeRuntimeLogProfile, InterludeService, listInterludeRuntimeLogs, LoggingConfig, MemoryConfig, OneBotAccountRule, OneBotNapCatConfig, RestWindow, RuntimeConfig, SharedStoryConfig, StickerLibraryConfig, StoryDefaults } from './service'
-import { AgencyConfig, AlterSystemConfig, ChatReactionName, NativeFaceSemantic, StorySetting } from './types'
+import { BlindModeConfig, BrowserConfig, ChatActionsConfig, Config as InterludeConfig, extractSessionVoiceCount, FullResetResult, GroupChatRule, interludeLoggerName, InterludeRuntimeLogProfile, InterludeService, listInterludeRuntimeLogs, LoggingConfig, MemoryConfig, OneBotAccountRule, OneBotNapCatConfig, RestWindow, RuntimeConfig, SharedStoryConfig, StickerLibraryConfig, StoryDefaults, TimelineDirectorConfig } from './service'
+import { AgencyConfig, AlterSystemConfig, ChatReactionName, ChatRhythmConfig, NativeFaceSemantic, StorySetting } from './types'
 import { HDS_INTERLUDE_VERSION } from './meta'
 import { GroupWillingnessConfig } from './group-willingness'
 import { resolveSchedulePreplanConfig, SchedulePreplanConfig, schedulePreplanWindow } from './schedule-preplan'
@@ -207,8 +207,10 @@ const Model: Schema<ModelConfig> = Schema.object({
   mainMaxTokens: Schema.natural().min(0).max(100_000).default(4096).description('主叙事最大输出 token 数。'),
   mainTimeout: Schema.natural().min(1_000).max(300_000).default(60_000).role('ms').description('主叙事请求超时，单位毫秒。'),
   mainResponseFormat: Schema.union(['json-object', 'prompt-only']).default('json-object').description('主叙事唯一的输出格式设置。支持 JSON mode 时选 json-object；不支持时改为 prompt-only。'),
-  mainStreamingMode: Schema.union(['off', 'experimental']).default('off').description('实验性私聊首泡加速；严格 Canon 守卫开启时自动停用。'),
+  mainStreamingMode: Schema.union(['off', 'experimental']).default('off').description('实验性私聊首泡加速；统一一致性审核或严格 Canon 守卫开启时自动停用，确保先审后发。'),
   mainPayloadOrder: Schema.union(['legacy', 'cache-first']).default('legacy').description('请求字段顺序；支持前缀缓存的接口可选 cache-first。'),
+  consistencyReview: Schema.boolean().default(true).description('按当前角色设定、历史、事件计划和允许的投递动作统一审核，不预设场景。复用压缩模型，通常每轮增加一次调用；失败最多重写一次。后台提出在场人物更新时也需审核，未通过保留原状态。启用时替代旧场景关键词和单独 Canon 审核。'),
+  consistencyReviewHistoryCharacters: Schema.natural().min(4000).max(200000).default(32000).description('逻辑审核的原始历史正文预算。优先保留被引用事件，再取近期记录；长记录同时保留开头和结尾，并标记省略。'),
   canonGuard: Schema.object({
     enabled: Schema.boolean().default(false).description('严格角色 Canon 守卫：每份草稿发送和落库前都进行独立一致性检查；冲突草稿会被丢弃并重写。会增加模型调用次数。'),
     maxRewriteAttempts: Schema.natural().min(0).max(3).default(1).description('发现 Canon 冲突后允许的未发布重写次数；仍冲突则本轮失败，不发送也不写入剧情。'),
@@ -304,7 +306,21 @@ const SchedulePreplan: Schema<SchedulePreplanConfig> = Schema.object({
   anchorAutoAdvance: Schema.boolean().default(true).description('让固定日程的开始/结束成为自动推进候选锚点，减少随机推进跨过上课、到校或离校等关键节点。'),
 })
 
+const TimelineDirector: Schema<TimelineDirectorConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('启用时间导演。连续失败会指数退避，六次后临时降级为经过统一审核的守恒推进。'),
+})
+
+const ChatRhythm: Schema<ChatRhythmConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('启用可见聊天节奏检测；只分析成功完整投递的文字，不影响旁白。'),
+  mode: Schema.union(['gentle', 'balanced', 'aggressive']).default('balanced').description('检测强度：gentle 只识别明显同构，balanced 兼顾结构与长度，aggressive 更早介入。'),
+  historyLimit: Schema.natural().min(5).max(20).default(12).description('每个故事保留的节奏签名数量；只保存结构，不保存消息正文。'),
+  collapseMinSamples: Schema.natural().min(3).max(10).default(5).description('开始判断节奏定型所需的最少完整回复数。'),
+  interventionLimit: Schema.natural().min(3).max(12).default(6).description('连续纠偏仍未改善时进入观察冷却的次数。'),
+  cooldownSamples: Schema.natural().min(1).max(12).default(4).description('熔断后仅观察、不注入纠偏的完整回复数。'),
+})
+
 const Agency: Schema<AgencyConfig> = Schema.object({
+  capacityPolicy: Schema.union(['contextual', 'conservative']).default('contextual').description('主动联系条件：contextual 按本次角色处境审核，允许有具体依据的短暂空档或隐私保障；conservative 使用固定条件。关闭统一审核时自动回到保守条件。设备完全不可用、目标权限和联系间隔仍是硬边界。'),
   enabled: Schema.boolean().default(true).description('启用主体行动窗口。它只判断日程、隐私、设备和生活来源的联系理由，不读取或复用 Alter 情绪值。'),
   maxWindowMinutes: Schema.natural().min(5).max(1_440).default(240).description('一张 Agency Window 最长有效时间；过期后必须由新的生活回合重新判断。'),
   minimumProactiveIntervalMinutes: Schema.natural().min(0).max(10_080).default(60).description('同一参与者两次普通主动联系之间的安全间隔；承诺型联系可以绕过。'),
@@ -508,6 +524,8 @@ export const Config: Schema<InterludeConfig> = Schema.object({
   model: Model.description('2. 模型：服务商、模型预设、主叙事、压缩、Embedding、视觉输入与独立图片生成。'),
   onebot: OneBot.description('3. OneBot/NapCat：机器人账号、私聊白名单和群聊白名单。'),
   runtime: Runtime.description('4. 对话与时间：消息合并、回复投递、失败重试和自动生活推进。'),
+  timelineDirector: TimelineDirector.description('12. 时间导演：本地时钟、事件账本、失败退避与熔断保护。'),
+  chatRhythm: ChatRhythm.description('13. 聊天节奏：无性别、无固定场景的可见回复反定型。'),
   schedulePreplan: SchedulePreplan.description('5. Schedule Preplan：近期稳定日程与变化颗粒度。'),
   sharedStory: SharedStory.description('6. 共享剧本：参与者加入、跨账号行为和管理员权限。'),
   chatActions: ChatActions.default({ enabled: false, platforms: ['qq'], quoteReply: true, messageReactions: true, allowedReactions: ['like', 'smile', 'laugh', 'heart'], nativeFaces: true, expressionThreshold: 0.7, allowedNativeFaces: ['smile', 'laugh', 'sweat', 'awkward'] }).description('7. 聊天动作：按平台启用指定回复与消息表情；只有已注册能力才进入提示词。'),

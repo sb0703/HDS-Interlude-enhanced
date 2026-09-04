@@ -20,14 +20,14 @@ function requestAt(from: Date, now: Date): NarrativeRequest {
   }
 }
 
-test('16:00 in Shanghai is an authoritative daylight afternoon', () => {
+test('16:00 in Shanghai is a clock afternoon, not evidence of daylight', () => {
   const instant = new Date('2026-08-23T08:00:00.000Z')
   const local = storyLocalTimeContext(instant, 'Asia/Shanghai')
   assert.equal(local.local, '2026-08-23 16:00:00')
   assert.equal(local.hour, 16)
   assert.equal(local.period, 'afternoon')
   assert.equal(local.periodZh, '下午')
-  assert.match(local.daylightExpectation, /normally daylight/)
+  assert.match(local.daylightExpectation, /unknown from clock alone/)
 })
 
 test('long intervals expose both endpoint clocks and continuity age', () => {
@@ -85,19 +85,19 @@ test('timeline display uses the story timezone and prints its GMT offset', () =>
 })
 
 test('explicit user-reported clocks stay distinct from the message receive time', () => {
-  const facts = extractUserReportedTimes('我 6.30 开始吃，刚吃完', new Date('2026-08-31T11:36:00.000Z'), 'Asia/Shanghai')
-  assert.deepEqual(facts, [{ localTime: '2026-08-31 18:30', relation: 'past', statement: '我 6.30 开始吃，刚吃完' }])
+  const facts = extractUserReportedTimes('我下午6.30 开始吃，刚吃完', new Date('2026-08-31T11:36:00.000Z'), 'Asia/Shanghai')
+  assert.deepEqual(facts, [{ localTime: '2026-08-31 18:30', relation: 'past', statement: '我下午6.30 开始吃，刚吃完' }])
 })
 
 test('prompt payload keeps receive time and user-reported action time as separate fields', () => {
   const now = new Date('2026-08-31T11:36:00.000Z')
   const request = requestAt(now, now)
   request.phase = 'user-message'
-  request.userMessage = '我 6.30 开始吃，刚吃完'
+  request.userMessage = '我下午6.30 开始吃，刚吃完'
   request.userReportedTimes = extractUserReportedTimes(request.userMessage, now, 'Asia/Shanghai')
   const payload = toPromptPayload(request)
   assert.equal(payload.currentEvent.observedAtLocal, '2026-08-31 19:36:00')
-  assert.deepEqual(payload.currentEvent.userReportedTimes, [{ localTime: '2026-08-31 18:30', relation: 'past', statement: '我 6.30 开始吃，刚吃完' }])
+  assert.deepEqual(payload.currentEvent.userReportedTimes, [{ localTime: '2026-08-31 18:30', relation: 'past', statement: '我下午6.30 开始吃，刚吃完' }])
 })
 
 test('the current user message remains both a durable event and the explicit currentEvent', () => {

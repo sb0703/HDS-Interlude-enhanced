@@ -175,12 +175,14 @@ test('a failed segment makes group delivery incomplete, even when an earlier seg
 test('private visible messages are confirmed only after transport, while failed drafts stay system-owned', async () => {
   const entries: any[] = []
   const characterUpdates: string[] = []
+  const rhythmUpdates: string[] = []
   const service = {
     serial: async (_storyId: string, task: () => Promise<void>) => task(),
     getParticipant: async (id: string) => ({ id }),
     appendEntry: async (_storyId: string, entry: any) => { entries.push(entry) },
     recordCharacterMessage: async (participant: { id: string }) => { characterUpdates.push(participant.id) },
     recordAutomaticDelivery: async () => undefined,
+    recordChatRhythm: async (_story: unknown, content: string) => { rhythmUpdates.push(content) },
     typingDelayMilliseconds: () => 100,
     appendIntent: async () => undefined,
     scheduleDueIntentWake: () => undefined,
@@ -198,4 +200,5 @@ test('private visible messages are confirmed only after transport, while failed 
   assert.equal(entries[1].actor, 'system')
   assert.match(entries[1].content, /未送达/)
   assert.deepEqual(characterUpdates, ['user'])
+  assert.deepEqual(rhythmUpdates, ['已经送达'])
 })

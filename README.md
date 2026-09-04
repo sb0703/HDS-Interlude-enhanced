@@ -6,13 +6,22 @@
 
 HDS Interlude 是一个面向 Koishi 一对一与多参与者场景的持续叙事聊天框架。它让用户消息、角色的沉默、延迟回复、主动联系和自动推进，都成为同一段生活剧本中自然可见的部分，并由一次主叙事写作连贯地决定。
 
-当前版本：`0.1.4`。提供宿主时间轴、持续生活剧本、结构化投递、Schedule Preplan、群聊意愿、多提供商模型连接与可选聊天动作。
+当前版本：`0.1.5-beta8-m6.custom.4`。在持续生活剧本、结构化投递、Schedule Preplan、群聊意愿和多提供商模型连接之外，本版重点补强故事本地时间、统一逻辑审核、自动推进退避、可见回复恢复、记忆压缩可靠性和动态聊天节奏。
 
 ## 项目来源与增强说明
 
 本项目基于官方 HDS Interlude 仓库 [MomoiCore/hds-interlude](https://gitee.com/MomoiCore/hds-interlude) 的内容和版本持续合并更新。官方仓库提供基础插件架构、持续叙事、时间轴、记忆、日程和模型连接等核心能力；本项目在此基础上保留官方功能，并补充了多账号、多实例故事隔离、人物形象一致性与参考图使用逻辑、严格角色设定约束、按机器人账号重置故事、运行日志隔离等增强内容。
 
 当官方仓库发布新版本时，本项目会优先合并官方更新，再保留并适配上述增强功能。若官方实现与增强功能存在差异，应以当前代码和配置指南为准。
+
+## 当前增强重点
+
+- **权威故事本地时间**：主叙事、时间导演和统一逻辑审核同时接收 UTC 与故事时区字段；日期、星期、早晚和跨午夜判断以本地时间为准。
+- **受控自动推进**：时间导演支持宽容计划解析、持久化退避和六次失败后的保守熔断；手动推进可以绕过冷却进行一次主动探测。
+- **统一逻辑审核**：候选剧本在落库和投递前检查时间、人物、事件与消息依据；审核格式异常可受限修复一次，仍无依据时拒绝提交。
+- **可见回复恢复**：模型遗漏私聊或群聊传输结构时，只补齐缺失字段，不重新创作整段剧本，也不把旁白提取成消息发送。
+- **可靠记忆整理**：场景压缩按内容指纹冷却并复核检查点，避免同一失败任务反复调用模型；Schedule Preplan 的结果与压缩失败解耦保存。
+- **自然聊天节奏**：`<sep/>` 常见变体会在模型可见回复中统一规范；ChatRhythm 只记录成功投递回复的结构签名，动态提示节奏变化，不保存正文、不写死角色或场景，也不增加模型调用。
 
 ## 文档导航
 
@@ -26,6 +35,8 @@ HDS Interlude 是一个面向 Koishi 一对一与多参与者场景的持续叙�
 - Schedule Preplan 近期日程层：[docs/SCHEDULE_PREPLAN.md](docs/SCHEDULE_PREPLAN.md)
 - 版本记录：[docs/CHANGELOG.md](docs/CHANGELOG.md)
 - 安全与依赖说明：[docs/SECURITY.md](docs/SECURITY.md)
+- Linux 双实例 NapCat 部署：[deploy/server/napcat/README.md](deploy/server/napcat/README.md)
+- Linux Koishi 服务迁移：[deploy/server/koishi/README.md](deploy/server/koishi/README.md)
 - 历史分析、失败版本与调试资料：[docs/README.md](docs/README.md)
 
 ## 它解决什么问题
@@ -313,25 +324,34 @@ npm install koishi-plugin-hds-interlude@beta
 
 ### 本地 tgz 安装
 
-使用本地预发布包时，可在 Koishi 实例目录执行：
+发布用 `.tgz` 不提交到 Git。完成本地构建并执行 `npm pack` 后，可在 Koishi 实例目录安装生成的预发布包：
 
 ```bash
-npm install /absolute/path/to/koishi-plugin-hds-interlude-0.1.4.tgz
+npm install /absolute/path/to/koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-npm install C:\dev\HDS-Interlude\plugins\hds-interlude\release\koishi-plugin-hds-interlude-0.1.4.tgz
+npm install C:\dev\HDS-Interlude\plugins\hds-interlude\release\koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz
 ```
 
 Koishi Desktop 的实例使用 Yarn 4。请在实例目录执行以下命令，并在完成后重载插件或重启 Desktop：
 
 ```powershell
-corepack yarn add "koishi-plugin-hds-interlude@file:C:/dev/HDS-Interlude/plugins/hds-interlude/release/koishi-plugin-hds-interlude-0.1.4.tgz" --exact
+corepack yarn add "koishi-plugin-hds-interlude@file:C:/dev/HDS-Interlude/plugins/hds-interlude/release/koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz" --exact
 ```
 
 安装后重新加载 Koishi，再在 Console 启用插件。
+
+### Linux 服务器部署
+
+仓库提供不含账号、Token、角色设定和运行数据库的部署模板：
+
+- [NapCat 双实例部署](deploy/server/napcat/README.md)：固定 NapCat `4.15.19`、Linux QQ `3.2.21-42086` 与镜像摘要，两个实例使用独立数据目录和本机回环端口。
+- [Koishi 服务迁移](deploy/server/koishi/README.md)：使用 `HDS_ROOT`、`HDS_BOT_1_QQ` 和 `HDS_BOT_2_QQ` 注入部署差异，并提供 systemd、Token 同步和配置校验脚本。
+
+真实 QQ、Access Token、`koishi.yml`、数据库、NapCat 数据目录和发布包必须通过私有渠道传输，不得提交到仓库。
 
 ### 开发实例
 
@@ -438,8 +458,8 @@ interlude.purge.range 2026-08-18T13:00:00+08:00 2026-08-19T02:00:00+08:00
 ```bash
 cd C:\dev\HDS-Interlude
 npm run typecheck
-npm run build
 npm test
+npm pack --dry-run
 ```
 
-构建产物位于 `plugins/hds-interlude/lib`。发布前建议运行构建、测试和 `npm pack --dry-run`，确认包内包含 `lib` 与需要分发的文档。
+运行时代码位于 `lib`。发布前应重新生成并核对该目录，再运行类型检查、完整测试和 `npm pack --dry-run`，确认安装包只包含运行代码与需要分发的文档。

@@ -1,0 +1,26 @@
+[Unit]
+Description=HDS-Interlude Koishi Service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=hdsbot
+Group=hdsbot
+WorkingDirectory=/opt/hds-interlude/.local-hdsi/koishi-app
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+Environment=PATH=/opt/hds-interlude/runtime/node-v20.19.0-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/hds-interlude/runtime/node-v20.19.0-linux-x64/bin/node node_modules/koishi/bin.js start
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

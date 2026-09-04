@@ -40,20 +40,20 @@ test('internal Alter accumulator and history never leak into the main prompt sta
 test('the fixed contract makes local endpoint time authoritative after long gaps', () => {
   const prompt = systemPrompt('user-message', '', '', '', '', '', false, false)
   assert.match(prompt, /interval\.nowLocalContext/)
-  assert.match(prompt, /16:00\/afternoon/)
+  assert.match(prompt, /only a local clock label/)
   assert.match(prompt, /continuity snapshot can be stale after reload or a long gap/i)
 })
 
-test('the fixed contract keeps explicit workday schedules authoritative', () => {
+test('the fixed contract respects character-specific schedules without importing a workweek', () => {
   const prompt = systemPrompt('user-message', '', '', '', '', '', false, false)
-  assert.match(prompt, /weekday, calendar and clock schedules/i)
-  assert.match(prompt, /lunch.*not the end of work/i)
-  assert.match(prompt, /repair the continuity/i)
+  assert.match(prompt, /explicit identity, capabilities, boundaries and actual schedule/i)
+  assert.match(prompt, /Do not import a conventional workweek/i)
+  assert.match(prompt, /Routine schedules describe expectations, not immutable facts/i)
 })
 
 test('the Canon guard produces strict bounded verdicts and recovery instructions', () => {
   assert.match(canonGuardPrompt(), /pre-publication character-canon compliance gate/i)
-  assert.match(canonGuardPrompt(), /Lunch.*not the end of a workday/i)
+  assert.match(canonGuardPrompt(), /Never assume a conventional workday/i)
   assert.deepEqual(normalizeCanonReview({ compliant: true, conflicts: [] }), { compliant: true, conflicts: [] })
   assert.deepEqual(normalizeCanonReview({ compliant: true, conflicts: ['11:20 下班与 18:30 下班冲突'] }), {
     compliant: false,
@@ -109,7 +109,9 @@ test('a missing visible-reply structure triggers a fresh-output recovery instruc
   const recovery = systemPrompt('user-message', '', '', '', '', '', false, false, false, false, true)
   assert.doesNotMatch(ordinary, /OUTPUT RECOVERY/)
   assert.match(recovery, /OUTPUT RECOVERY/)
-  assert.match(recovery, /fresh unpublished decision/)
+  assert.match(recovery, /prior unpublished provider object/)
+  assert.match(recovery, /Preserve its script/)
+  assert.match(recovery, /Do not omit the required field/)
 })
 
 test('recent script ownership makes narrative thoughts unambiguously protagonist-owned', () => {

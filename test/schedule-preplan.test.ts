@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { systemPrompt, toPromptPayload } from '../src/narrator'
 import {
-  applySchedulePreplanProposal, DEFAULT_SCHEDULE_PREPLAN_CONFIG, materializeSchedulePreplan,
+  applySchedulePreplanProposal, configuredWeekdaySchedule, DEFAULT_SCHEDULE_PREPLAN_CONFIG, materializeSchedulePreplan,
   nextSchedulePreplanTransition, schedulePreplanNeedsModel, schedulePreplanReviewDue, schedulePreplanWindow,
 } from '../src/schedule-preplan'
 import { emptyStorySetting, emptyStoryState, NarrativeRequest, SchedulePreplanRecord, SchedulePreplanRegime, ScriptEntry } from '../src/types'
@@ -80,6 +80,22 @@ test('an evidence-free first review persists an explicit empty schedule instead 
   assert.deepEqual(empty!.regimes, [])
   assert.equal(empty!.lastReviewedLocalDate, '2026-08-31')
   assert.equal(schedulePreplanNeedsModel(empty, [], '2026-08-31', 'Asia/Shanghai', DEFAULT_SCHEDULE_PREPLAN_CONFIG), false)
+})
+
+test('an explicit profile weekday timetable seeds routine blocks without a model inference', () => {
+  const routine = configuredWeekdaySchedule(`八、典型工作日日程
+06:25—06:45｜醒来与恢复状态
+12:00—13:30｜午饭与中午缓冲
+19:50—21:00｜晚饭
+九、周末状态
+周末以休息为主。`, '2026-09-03')
+  assert.ok(routine)
+  assert.deepEqual(routine!.weekly.monday?.map(block => [block.start, block.end, block.label]), [
+    ['06:25', '06:45', '醒来与恢复状态'],
+    ['12:00', '13:30', '午饭与中午缓冲'],
+    ['19:50', '21:00', '晚饭'],
+  ])
+  assert.equal(routine!.weekly.saturday, undefined)
 })
 
 test('Chinese stable ids from a Chinese compaction model remain distinct', () => {

@@ -1,8 +1,9 @@
 import { Context, Service, Session } from 'koishi';
 import { ModelConfig } from './narrator';
+export { extractUserReportedTimes, narrativeClockConflict } from './temporal-evidence';
 import { GroupWillingnessConfig } from './group-willingness';
 import { SchedulePreplanConfig } from './schedule-preplan';
-import { ImageSubject, InterludeArc, InterludeScene, InterludeParticipant, InterludeStory, NarrativeDecision, NarrativeFact, NarrativeIntent, GroupContext, NarrativeInteraction, NarrativeProvider, NarrativeRequest, NarrativeCompactor, NarrativeEmbedder, OutgoingMessageDraft, ScriptEntry, StatePatchProposal, StorySetting, StoryState, OverlaySnapshot, AlterSystemConfig, AgencyConfig, ScenePresenceState, ChatActionCapabilities, ChatReactionName, MessageReactionDraft, NativeFaceSemantic, QuotedMessageContext, SchedulePreplanRecord, TimelinePlan, UserReportedTime } from './types';
+import { ImageSubject, InterludeArc, InterludeScene, InterludeParticipant, InterludeStory, NarrativeDecision, NarrativeFact, NarrativeIntent, GroupContext, NarrativeInteraction, NarrativeProvider, NarrativeRequest, NarrativeCompactor, NarrativeEmbedder, OutgoingMessageDraft, ScriptEntry, StatePatchProposal, StorySetting, StoryState, OverlaySnapshot, AlterSystemConfig, AgencyConfig, ScenePresenceState, ChatActionCapabilities, ChatReactionName, MessageReactionDraft, NativeFaceSemantic, QuotedMessageContext, SchedulePreplanRecord, TimelinePlan, ChatRhythmConfig } from './types';
 /** Semantic recall is another view of raw history, so it must obey the same
  * private-branch boundary as recentScript. Group transcripts are deliberately
  * excluded from a private turn unless the owner opted into shared details. */
@@ -32,6 +33,11 @@ export interface Config {
     alterSystem?: AlterSystemConfig;
     agency?: AgencyConfig;
     schedulePreplan?: SchedulePreplanConfig;
+    timelineDirector?: TimelineDirectorConfig;
+    chatRhythm?: ChatRhythmConfig;
+}
+export interface TimelineDirectorConfig {
+    enabled: boolean;
 }
 export interface BlindModeConfig {
     enabled: boolean;
@@ -338,6 +344,7 @@ export declare class InterludeService extends Service {
     private historyVectorsReady;
     /** Per-story retry-after timestamps for failed Schedule Preplan generations. */
     private schedulePreplanBackoff;
+    private compactionBackoff;
     private stickerById;
     private stickerScanRunning;
     /**
@@ -383,6 +390,7 @@ export declare class InterludeService extends Service {
     private cachedAlterSystemConfig?;
     private cachedAgencyConfig?;
     private cachedSchedulePreplanConfig?;
+    private cachedChatRhythmConfig?;
     private cachedBlindModeConfig?;
     private cachedAutoAdvanceConfig?;
     private cachedSharedStoryConfig?;
@@ -628,7 +636,18 @@ export declare class InterludeService extends Service {
      * compaction route first returns a tiny relative-time ledger; if it cannot,
      * preserving the current cursor is safer than writing an ungrounded future. */
     private planAutomaticTimeline;
+    private timelineDirectorFailures;
+    private persistTimelineDirectorRetry;
+    private clearTimelineDirectorRetry;
+    /** Audit the exact privacy-filtered generation context and a read-only
+     * preview of permitted transport. Never extract outgoing text from prose. */
+    private reviewCandidate;
     private tryDecide;
+    /** Detect a model draft that merely restages the latest scene. This runs
+     * before persistence, so a rejected draft cannot create another durable
+     * script row or advance the story clock. Participant branches remain private
+     * while global entries stay visible to every branch in a shared story. */
+    private narrativeRepetition;
     private persistDecision;
     /** Keep the active-scene anchor in sync with the host ledger immediately,
      * rather than waiting for prose compaction to reconcile an already-completed
@@ -639,6 +658,7 @@ export declare class InterludeService extends Service {
     private get alterSystemConfig();
     private get agencyConfig();
     private get schedulePreplanConfig();
+    private get chatRhythmConfig();
     private get blindModeConfig();
     private emotionalOffsetForPrompt;
     private updateAlterSystem;
@@ -769,6 +789,15 @@ export declare class InterludeService extends Service {
     private scheduleCompaction;
     private compactStories;
     private getSchedulePreplan;
+    /** A profile edit invalidates its derived routine, never observed history.
+     * Interpretation is delegated to the existing planner, without heading,
+     * weekday, occupation or clock-format assumptions. Failed reviews do not
+     * expose the obsolete schedule as current evidence. */
+    private ensureConfiguredSchedulePreplan;
+    private compactionFingerprint;
+    private compactionIsBackedOff;
+    private noteCompactionFailure;
+    private compactionCheckpointAdvanced;
     private schedulePreplanEvidence;
     private saveSchedulePreplan;
     private prepareSchedulePreplanReview;
@@ -782,10 +811,14 @@ export declare class InterludeService extends Service {
     private scheduleStreamScriptRecovery;
     private persistStreamScriptRecovery;
     private compactUnlocked;
+    private recordChatRhythm;
     /** Everything up to the expensive compactor call: cheap reads plus the due
      * checks. Runs inside the story serial queue, but the model call itself must
      * not — a queued compactor request would delay the next live turn. */
     private prepareCompaction;
+    /** Reuse the same semantic auditor for proposed memory transitions, outside
+     * the normal background persistence lock. Missing review never changes a roster. */
+    private reviewCompactionPresence;
     /** Cheap DB persistence for one compaction decision. Re-acquires the story
      * serial queue in the caller so writes stay ordered with narrative turns. */
     private applyCompaction;
@@ -864,30 +897,27 @@ export declare function calibratedNativeFaceWillingness(semantic: NativeFaceSema
  * content hash fragment so every row is globally unique and stable for an
  * unchanged file. */
 export declare function stableStickerAssetId(filePath: string, hash: string): string;
-/** Extract only explicit clock statements from a live user message. This is a
- * small factual aid, not an attempt to infer every temporal expression. */
-export declare function extractUserReportedTimes(content: string, now: Date, timezone: string): UserReportedTime[];
 export declare function describeQuotedMessage(session: Session, characterName?: string): QuotedMessageContext | undefined;
 export declare function normalizeQuotedMessageContent(value: unknown): string;
 export declare function normalizeAllowedReactions(value: unknown): ChatReactionName[];
 /** Parse only the narrow event ledger shape. Unknown model fields and empty
  * plans are discarded before they can become a source of world state. */
 export declare function normalizeTimelinePlan(value: unknown): TimelinePlan | undefined;
+export declare function timelineRetryDelayMilliseconds(failures: number): number;
 /** Automatic script prose is a rendering, not the next turn's temporal source.
  * A compact host ledger retains the real sequence without letting a previous
  * paragraph be copied into a new time window. */
 export declare function timelineEntryPromptProjection(entry: ScriptEntry): ScriptEntry;
 export declare function normalizeGroupChatActions(decision: NarrativeDecision, capabilities: ChatActionCapabilities | undefined, context: GroupContext): ExecutableGroupChatActions;
 export declare function formatGroupSpeaker(senderName: string, senderId: string): string;
-export declare function normalizeGroupVisibleReply(raw: NarrativeDecision['groupReply'], interaction: NarrativeDecision['interaction'], maxCharacters: number): string;
+export declare function normalizeGroupVisibleReply(raw: NarrativeDecision['groupReply'], interaction: NarrativeDecision['interaction'], maxCharacters: number, separator?: string): string;
 export declare function visibleReplyMode(decision: NarrativeDecision, phase: NarrativeRequest['phase'], groupContext?: GroupContext): string;
 export declare function hasRequiredNarrativeScript(value: NarrativeDecision | undefined | null): boolean;
 export declare function resolveBlindModeConfig(value?: Partial<BlindModeConfig>): BlindModeConfig;
 /** @deprecated Renamed to resolveBlindModeConfig. */
 export declare const resolveBlackBoxConfig: typeof resolveBlindModeConfig;
-/** Scene compaction may update a tiny roster only with explicit observed
- * evidence. This keeps named supporting cast available without treating them
- * as automatically present. */
+/** Structural grounding only, not a semantic verdict. The caller must audit
+ * these candidates before persistence; quoted words do not prove a status. */
 export declare function normalizeScenePresenceDrafts(value: unknown, entries: ScriptEntry[], now?: Date): ScenePresenceState[];
 export declare function formatQuotedMessageContext(quote: unknown, selfId?: unknown): string;
 export declare function extractQuotedMessageContext(quote: unknown, selfId?: unknown): {
@@ -912,6 +942,71 @@ export declare function shouldSupersedeNarrativeRequest(inFlightRequestId: numbe
  * drivers and hot-reload paths can return ISO strings, so normalize every row
  * crossing the service boundary before time arithmetic or prompt building. */
 export declare function normalizeDatabaseRow(table: string, value: unknown): any;
+/** Normalize volatile clock details before comparing prose. This catches the
+ * common failure mode where the model copies a scene and changes only 10:10 to
+ * 10:20, while leaving meaningful wording and CJK characters intact. */
+export declare function normalizeNarrativeComparison(value: string): string;
+/** Automatic prose may render only the host-owned ledger. This catches common
+ * lifecycle jumps such as a plan that stops at "started lunch" while prose
+ * invents finishing lunch, leaving the cafeteria, or being back at the desk.
+ * The check intentionally uses only clear start/finish markers so normal
+ * descriptive wording does not become a false positive. */
+export declare function narrativeTimelinePlanConflict(script: string | undefined, plan: TimelinePlan | undefined, interaction?: NarrativeInteraction): {
+    lifecycle: string;
+    planned: string;
+    observed: string;
+};
+/** Guard an explicit configured routine after its window has passed. Unlike the
+ * timeline ledger guard, this does not say the planned block happened; it only
+ * rejects prose that starts the same routine implausibly late without showing
+ * an observed reason (a delayed meeting, emergency, traffic, and so on). */
+export declare function narrativeScheduleWindowConflict(script: string | undefined, schedule: SchedulePreplanRecord | undefined, now: Date, timezone: string, interaction?: NarrativeInteraction): {
+    routine: string;
+    scheduled: string;
+    observed: string;
+    lateByMinutes: number;
+};
+/** Automatic windows should show a bounded slice of life, not a montage that
+ * leaves one scene, crosses several places and returns to the start. This is
+ * deliberately a prose safety net: the timeline ledger remains the primary
+ * source of allowed events, while this catches a narrator that embellishes it
+ * into extra commutes, arrivals and return trips. */
+export declare function narrativeAutomaticSceneLoop(script: string | undefined, from: Date, now: Date): {
+    locations: string[];
+    transitions: number;
+    elapsedMinutes: number;
+    returnedToStart: boolean;
+};
+/** Extract only coarse physical settings in their narrative order. The terms
+ * are intentionally conservative; an unclassified place simply cannot cause
+ * a false scene-loop rejection. */
+export declare function narrativeLocationSequence(value: string): string[];
+/** Recovery has a stricter contract than an ordinary next turn. Once a draft
+ * has already been identified as a duplicate, a few new words or one extra
+ * action marker are not enough: the rewrite must leave the old scene body. */
+export declare function narrativeRecoveryStillSimilar(repetition: {
+    coreSimilarity: number;
+    segmentOverlapRatio: number;
+    segmentOverlapCount: number;
+}): boolean;
+/** Compare sentence-sized scene facts independently. This catches a draft
+ * that changes the first sentence or incoming quote while copying several
+ * later physical-state/action sentences almost verbatim. The ratio is based
+ * on the amount of current prose covered by a close prior sentence, and the
+ * segment count prevents one generic sentence from tripping the guard. */
+export declare function narrativeSegmentOverlap(left: string, right: string): {
+    ratio: number;
+    matchedSegments: number;
+    novelRatio: number;
+};
+/** A scene may stay in one room while still moving forward. Treat a candidate
+ * as progression when it introduces a concrete state/action change rather
+ * than merely repeating the same setting and waiting posture. */
+export declare function narrativeHasProgression(current: string, previous: string): boolean;
+/** A blended character n-gram Jaccard score works for Chinese and prose with
+ * spaces. Two-grams catch paraphrased shared anchors while three-grams keep
+ * unrelated short overlaps from becoming a false duplicate. */
+export declare function narrativeTextSimilarity(left: string, right: string): number;
 /** How many sticker descriptions a semantically filtered turn injects. */
 export declare const SEMANTIC_STICKER_LIMIT = 12;
 /** Pure ranking used by the semantic sticker filter. Assets without a vector

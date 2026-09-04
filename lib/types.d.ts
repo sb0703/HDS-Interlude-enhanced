@@ -47,6 +47,10 @@ export interface StoryState {
     /** Host-owned unresolved state carried forward from the latest completed
      * automatic event ledger. This outranks prose-derived scratchpad wording. */
     timelineCarry?: string[];
+    /** Host fingerprint of the profile used to build the current routine plan. */
+    scheduleProfileFingerprint?: string;
+    /** Host-derived visible-message cadence; contains no message正文. */
+    chatRhythm?: ChatRhythmState;
 }
 /** A tiny structured scratchpad entry. Not a durable fact: it exists to carry
  * small concrete details across the compaction boundary and then expire. */
@@ -136,6 +140,9 @@ export interface SchedulePreplanReviewRequest {
     variationLevel?: 'stable' | 'contextual' | 'granular';
     current: SchedulePreplanRecord | null;
     evidenceEntries: ScriptEntry[];
+    characterProfile?: string;
+    timezone?: string;
+    profileChanged?: boolean;
 }
 export interface SchedulePreplanWindow {
     name: 'Schedule Preplan';
@@ -182,6 +189,43 @@ export interface StoryAutomationState {
     /** Relationship branch whose recent conversation supplies the 10/20-minute
      * continuity context. Omitted for ordinary background advancement. */
     conversationFollowUpParticipantId?: string;
+    /** Persisted timeline-director retry gate; survives plugin reloads. */
+    timelineRetryAt?: string;
+    timelineRetryFrom?: string;
+    timelineDirectorFailures?: number;
+}
+export type ChatRhythmMode = 'gentle' | 'balanced' | 'aggressive';
+export type ChatRhythmShape = 's' | 'm' | 'l' | 'xl';
+export type ChatRhythmTail = 'question' | 'emphatic' | 'statement' | 'word';
+export interface RhythmSignature {
+    bubbles: number;
+    shape: ChatRhythmShape[];
+    tail: ChatRhythmTail;
+    totalChars: number;
+}
+export interface CollapsedRhythm {
+    templateKey: string;
+    reason: 'same-structure' | 'tail-repeat' | 'length-box';
+    streak: number;
+}
+export interface ChatRhythmState {
+    recent: RhythmSignature[];
+    collapsed?: CollapsedRhythm;
+    interventionCount?: number;
+    cooldownRemaining?: number;
+    updatedAt: string;
+}
+export interface ChatRhythmPrompt {
+    state: string;
+    drift: string;
+}
+export interface ChatRhythmConfig {
+    enabled: boolean;
+    mode: ChatRhythmMode;
+    historyLimit: number;
+    collapseMinSamples: number;
+    interventionLimit: number;
+    cooldownSamples: number;
 }
 export type AgencyActivityLoad = 'free' | 'occupied' | 'overloaded';
 export type AgencyPrivacy = 'private' | 'shared' | 'public';
@@ -203,6 +247,8 @@ export interface ProactiveContactDraft {
     participantId: string;
     origin: ProactiveContactOrigin;
     motive: string;
+    /** Concrete, candidate-specific explanation of practical ability to send now. */
+    capacityReason?: string;
     disclosure: ProactiveDisclosure;
     sourceEntryIds?: number[];
     willingness?: number;
@@ -215,6 +261,7 @@ export interface AgencyConfig {
     maxWindowMinutes: number;
     minimumProactiveIntervalMinutes: number;
     maxCandidateHours: number;
+    capacityPolicy?: 'conservative' | 'contextual';
 }
 export interface StorySettingOverlay {
     characterProfile?: string;
@@ -621,14 +668,23 @@ export interface NarrativeImage {
     dataUri: string;
 }
 export interface NarrativeRequest {
+    /** Host will run the unified audit; skip the narrower legacy Canon audit. */
+    contextualReview?: boolean;
     /** 主模型只读取经过预算控制的连续性包，不读取完整历史。 */
     phase: NarrativePhase;
     /** Refresh the compact continuity note on this turn. */
     refreshContinuity?: boolean;
     /** A prior unpublished draft omitted its required visible-reply structure. */
     outputRecovery?: boolean;
+    /** The unpublished provider object that triggered output recovery. It is
+     * returned to the model as data so the repair pass can preserve the prose
+     * and fix the transport shape instead of independently repeating the turn. */
+    outputRecoveryDraft?: NarrativeDecision;
     /** Canon conflicts found in an unpublished draft; the next draft must repair them. */
     canonRecovery?: string[];
+    /** A prior unpublished draft was too similar to recent narration; rewrite it
+     * with a concrete new event or a clear scene transition. */
+    narrativeRecovery?: string;
     story: InterludeStory;
     from: Date;
     now: Date;
@@ -648,6 +704,14 @@ export interface NarrativeRequest {
     /** Host-validated event plan for an automatic window. Prose renders this plan
      * but is no longer the source of temporal truth. */
     timelinePlan?: TimelinePlan;
+    /** Present only after the timeline director has fused and narration is
+     * allowed to make one conservative, independently audited fallback pass. */
+    timelineFallback?: {
+        mode: 'conservative';
+        failureCount: number;
+    };
+    /** Host-derived cadence hint for visible chat fields only. */
+    chatRhythm?: ChatRhythmPrompt;
     /** Latest host-owned unresolved state from previously completed automatic beats. */
     timelineCarry?: string[];
     /** The relationship that caused this turn; null for unattended life updates. */
@@ -698,8 +762,9 @@ export interface NarrativeRequest {
     recalledHistory?: RecalledMoment[];
 }
 export interface UserReportedTime {
-    localTime: string;
-    relation: 'past' | 'future' | 'current';
+    localTime?: string;
+    relation: 'past' | 'future' | 'current' | 'ambiguous';
+    alternatives?: string[];
     statement: string;
 }
 export type TimelineBeatKind = 'activity' | 'thought' | 'state';
@@ -715,6 +780,8 @@ export interface TimelinePlan {
     carry?: string[];
 }
 export interface TimelinePlanRequest {
+    /** Host diagnostics for one bounded replan; not a new story event. */
+    recovery?: string;
     story: InterludeStory;
     participant: InterludeParticipant | null;
     phase: Extract<NarrativePhase, 'advance' | 'conversation-follow-up' | 'intent-due'>;
@@ -815,6 +882,8 @@ export interface ScenePresenceDraft {
     name: string;
     status: ScenePresenceStatus;
     basis: string;
+    /** Exact subject-bearing source excerpt; semantic validity is audited separately. */
+    evidenceQuote?: string;
     sourceEntryIds: number[];
 }
 export interface CompactionDecision {
@@ -835,7 +904,9 @@ export interface CompactionDecision {
 }
 export interface WorkingDetailDraft {
     label: string;
-    value: string;
+    /** resolved removes the matching label using observed completion evidence. */
+    status?: 'active' | 'resolved';
+    value?: string;
     expiresAt?: string;
     sourceEntryIds?: number[];
 }
@@ -854,6 +925,8 @@ export interface OverlayCompactionDecision {
     majorEvents?: string[];
 }
 export interface NarrativeCompactor {
+    /** Independent contextual audit; no event generation or transport authority. */
+    reviewNarrative?(request: import('./narrative-consistency').NarrativeReviewRequest): Promise<import('./narrative-consistency').NarrativeReview | undefined>;
     compact(request: CompactionRequest): Promise<CompactionDecision>;
     compactOverlay(request: OverlayCompactionRequest): Promise<OverlayCompactionDecision>;
     /** A small, independent daily review. Keeping it outside scene compaction

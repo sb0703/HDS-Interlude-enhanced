@@ -1,5 +1,6 @@
 import { Context } from 'koishi';
 import { AlterAnalysisDecision, AlterAnalysisRequest, AlterSystemConfig, ChatActionCapabilities, CompactionDecision, CompactionRequest, ImageSubject, NarrativeDecision, NarrativeProvider, OverlayCompactionDecision, OverlayCompactionRequest, EarlyNarrativeReply, NarrativeCompactor, NarrativeEmbedder, NarrativeImage, NarrativeRequest, SchedulePreplanProposal, SchedulePreplanReviewRequest, StickerCatalogEntry, TimelinePlan, TimelinePlanRequest } from './types';
+import { NarrativeReviewRequest } from './narrative-consistency';
 export { storyLocalTimeContext } from './time';
 export type ProviderResponseFormat = 'json-object' | 'prompt-only';
 export type ProviderStrategy = 'priority' | 'round-robin';
@@ -84,6 +85,9 @@ export interface ModelConfig {
     /** cache-first reorders the user payload so stable blocks (history, memory layers) precede
      * per-turn fields, letting provider prefix caches hit across consecutive turns. */
     mainPayloadOrder?: 'legacy' | 'cache-first';
+    /** Contextual audit before persistence; uses the configured compaction route. */
+    consistencyReview?: boolean;
+    consistencyReviewHistoryCharacters?: number;
     compaction?: CompactionConfig;
     embedding?: EmbeddingConfig;
     /** OpenAI-compatible native image inputs for the current private-message turn. */
@@ -251,6 +255,7 @@ export declare class OpenAICompatibleNarrator implements NarrativeProvider {
     decide(request: NarrativeRequest): Promise<NarrativeDecision>;
     compact(request: CompactionRequest): Promise<CompactionDecision>;
     planTimeline(request: TimelinePlanRequest): Promise<TimelinePlan | undefined>;
+    reviewNarrative(request: NarrativeReviewRequest): Promise<import("./narrative-consistency").NarrativeReview>;
     planSchedulePreplan(request: SchedulePreplanReviewRequest): Promise<SchedulePreplanProposal | undefined>;
     compactOverlay(request: OverlayCompactionRequest): Promise<OverlayCompactionDecision>;
     analyzeAlter(request: AlterAnalysisRequest, alterConfig: AlterSystemConfig): Promise<AlterAnalysisDecision>;
@@ -317,15 +322,23 @@ export declare function computeTokenCost(record: TokenUsageRecord): {
 export declare function formatTokenUsageLine(record: TokenUsageRecord): string;
 export declare function canonGuardPrompt(): string;
 export declare function normalizeCanonReview(value: unknown): CanonReview;
-export declare function systemPrompt(phase: NarrativeRequest['phase'], mainPrompt: string | undefined, formatPrompt: string | undefined, fixedPrompt: string, baseStylePrompt: string, storyStylePrompt: string, _refreshContinuity?: boolean, alterEnabled?: boolean, agencyEnabled?: boolean, perspectiveEnabled?: boolean, outputRecovery?: boolean, chatCapabilities?: ChatActionCapabilities, hasQuotedMessage?: boolean, stickerCatalog?: StickerCatalogEntry[], schedulePreplanEnabled?: boolean | string[], streamingReplyFirst?: boolean, cacheFirstPayload?: boolean, canonRecovery?: string[]): string;
+export declare function systemPrompt(phase: NarrativeRequest['phase'], mainPrompt: string | undefined, formatPrompt: string | undefined, fixedPrompt: string, baseStylePrompt: string, storyStylePrompt: string, _refreshContinuity?: boolean, alterEnabled?: boolean, agencyEnabled?: boolean, perspectiveEnabled?: boolean, outputRecovery?: boolean, chatCapabilities?: ChatActionCapabilities, hasQuotedMessage?: boolean, stickerCatalog?: StickerCatalogEntry[], schedulePreplanEnabled?: boolean | string[], streamingReplyFirst?: boolean, cacheFirstPayload?: boolean, canonRecovery?: string[], narrativeRecovery?: string): string;
 export declare function storyStateForPrompt(state: NarrativeRequest['story']['state']): {
+    automation: {
+        quietUntil?: string;
+        nextAdvanceAt?: string;
+        lastAutoAdvanceAt?: string;
+        lastUserMessageAt?: string;
+        conversationFollowUpAt?: string[];
+        conversationFollowUpParticipantId?: string;
+    };
     settingOverlay: import("./types").StorySettingOverlay;
     activeSceneId?: number;
     activeArcId?: number;
     narrativeUpdateCount: number;
     lastContinuityUpdateAt?: string;
-    automation: import("./types").StoryAutomationState;
     scenePresence?: import("./types").ScenePresenceState[];
+    scheduleProfileFingerprint?: string;
 };
 export type RecentScriptOwnership = 'protagonist-narrative' | 'user-delivered-message' | 'protagonist-delivered-message' | 'external-group-message' | 'system-event';
 export declare function recentScriptOwnership(entry: Pick<NarrativeRequest['recentEntries'][number], 'kind' | 'actor'>): RecentScriptOwnership;
@@ -393,7 +406,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     }[];
     durableFacts: {
         participantId: string;
-        scope: "promise" | "character" | "world" | "relationship" | "event";
+        scope: "character" | "relationship" | "promise" | "world" | "event";
         content: string;
         importance: number;
         confidence: number;
@@ -432,6 +445,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     phase: import("./types").NarrativePhase;
     refreshContinuity: boolean;
     outputRecovery: boolean;
+    outputRecoveryDraft: NarrativeDecision;
     imageGenerationEnabled: boolean;
     characterReferenceImageEnabled: boolean;
     interval: {
@@ -476,7 +490,36 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
             summary: string;
         }[];
     };
+    timelineFallback: {
+        mode: "conservative";
+        failureCount: number;
+    };
+    chatRhythm: import("./types").ChatRhythmPrompt;
     timelineCarry: string[];
+    recentContinuity: {
+        lastNarratedBeat: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        };
+        alreadyNarrated: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        }[];
+        deliveredMessages: {
+            entryId: number;
+            participantId: string;
+            kind: string;
+            direction: string;
+            occurredAt: string;
+            content: string;
+        }[];
+    };
     setting: {
         perspective: string;
         user: {
@@ -492,13 +535,21 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
         timezone: string;
     };
     state: {
+        automation: {
+            quietUntil?: string;
+            nextAdvanceAt?: string;
+            lastAutoAdvanceAt?: string;
+            lastUserMessageAt?: string;
+            conversationFollowUpAt?: string[];
+            conversationFollowUpParticipantId?: string;
+        };
         settingOverlay: import("./types").StorySettingOverlay;
         activeSceneId?: number;
         activeArcId?: number;
         narrativeUpdateCount: number;
         lastContinuityUpdateAt?: string;
-        automation: import("./types").StoryAutomationState;
         scenePresence?: import("./types").ScenePresenceState[];
+        scheduleProfileFingerprint?: string;
     };
     continuitySnapshot: {
         next: any[];
@@ -562,7 +613,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     groupContext: {
         messages: {
             occurredAt: string;
-            direction: "character" | "user";
+            direction: "user" | "character";
             quote?: import("./types").QuotedMessageContext;
             senderId: string;
             senderName: string;
@@ -614,6 +665,20 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
         };
         elapsedSeconds: number;
     };
+    timelinePlan: {
+        carry?: string[];
+        beats: {
+            at: number;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        }[];
+    };
+    timelineFallback: {
+        mode: "conservative";
+        failureCount: number;
+    };
+    chatRhythm: import("./types").ChatRhythmPrompt;
+    timelineCarry: string[];
     continuitySnapshotAgeMinutes: number;
     recalledHistory: {
         id: number;
@@ -643,6 +708,30 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
         current: string;
         recent: string[];
         salient: string[];
+    };
+    recentContinuity: {
+        lastNarratedBeat: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        };
+        alreadyNarrated: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        }[];
+        deliveredMessages: {
+            entryId: number;
+            participantId: string;
+            kind: string;
+            direction: string;
+            occurredAt: string;
+            content: string;
+        }[];
     };
     workingDetails: {
         expiresAt?: string;
@@ -691,13 +780,21 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
         id: string;
     }[];
     state: {
+        automation: {
+            quietUntil?: string;
+            nextAdvanceAt?: string;
+            lastAutoAdvanceAt?: string;
+            lastUserMessageAt?: string;
+            conversationFollowUpAt?: string[];
+            conversationFollowUpParticipantId?: string;
+        };
         settingOverlay: import("./types").StorySettingOverlay;
         activeSceneId?: number;
         activeArcId?: number;
         narrativeUpdateCount: number;
         lastContinuityUpdateAt?: string;
-        automation: import("./types").StoryAutomationState;
         scenePresence?: import("./types").ScenePresenceState[];
+        scheduleProfileFingerprint?: string;
     };
     emotionalOffset: import("./types").EmotionalOffsetPrompt;
     agencyWindow: import("./types").AgencyWindowState;
@@ -753,7 +850,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     groupContext: {
         messages: {
             occurredAt: string;
-            direction: "character" | "user";
+            direction: "user" | "character";
             quote?: import("./types").QuotedMessageContext;
             senderId: string;
             senderName: string;
@@ -792,7 +889,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     }[];
     durableFacts: {
         participantId: string;
-        scope: "promise" | "character" | "world" | "relationship" | "event";
+        scope: "character" | "relationship" | "promise" | "world" | "event";
         content: string;
         importance: number;
         confidence: number;
@@ -816,5 +913,101 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
 /** Compact ownership tags for cache-first payloads: one short label replaces the
  * kind/actor/participantId triple. Distinctions the ownership label alone would
  * lose (group posting, platform actions) survive as suffixes. */
-export declare function compactScriptTag(kind: string, actor: string): "protagonist" | "user" | "system" | "protagonist(group)" | "protagonist(action)" | "protagonist-narration" | "group-member";
+export declare function compactScriptTag(kind: string, actor: string): "user" | "protagonist" | "system" | "protagonist(group)" | "protagonist(action)" | "protagonist-narration" | "group-member";
 export declare function promptVisibleMessageContent(content: string, ownership: RecentScriptOwnership): string;
+export declare function toTimelinePlanPayload(request: TimelinePlanRequest): {
+    canon: {
+        character: import("./types").CharacterSetting;
+        perspective: string;
+        world: string;
+        location: string;
+    };
+    evolvingSetting: import("./types").StorySettingOverlay;
+    interval: {
+        from: string;
+        now: string;
+        storyTimezone: string;
+        fromLocal: string;
+        nowLocal: string;
+        fromLocalContext: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
+        nowLocalContext: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
+    };
+    phase: "advance" | "conversation-follow-up" | "intent-due";
+    currentParticipant: {
+        id: string;
+        displayName: string;
+    };
+    activeScene: {
+        hook: string;
+        summary: string;
+    };
+    schedule: import("./types").SchedulePreplanWindow;
+    dueIntents: {
+        streamRecovery?: boolean;
+        pendingReplyDraft?: string;
+        id: number;
+        type: string;
+        summary: string;
+        notBefore: string;
+    }[];
+    recentContinuity: {
+        lastNarratedBeat: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        };
+        alreadyNarrated: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: import("./types").TimelineBeatKind;
+            summary: string;
+        }[];
+        deliveredMessages: {
+            entryId: number;
+            participantId: string;
+            kind: string;
+            direction: string;
+            occurredAt: string;
+            content: string;
+        }[];
+    };
+    facts: {
+        scope: "character" | "relationship" | "promise" | "world" | "event";
+        content: string;
+        unresolved: boolean;
+    }[];
+    recentEntries: {
+        kind: string;
+        actor: string;
+        content: string;
+        occurredAt: string;
+    }[];
+    recovery?: string;
+};

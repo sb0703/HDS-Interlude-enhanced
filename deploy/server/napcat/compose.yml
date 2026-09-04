@@ -1,0 +1,39 @@
+name: hds-interlude-napcat
+
+x-napcat-common: &napcat-common
+  image: mlikiowa/napcat-docker@sha256:77c9fa8d8ae05b6a15251e3f0121392b466828444877b276b57aca0e9ff776e0
+  platform: linux/amd64
+  restart: unless-stopped
+  init: true
+  shm_size: 1gb
+  stop_grace_period: 30s
+  environment:
+    NAPCAT_UID: ${NAPCAT_UID:-1000}
+    NAPCAT_GID: ${NAPCAT_GID:-1001}
+
+services:
+  napcat-1:
+    <<: *napcat-common
+    container_name: hds-napcat-1
+    hostname: napcat-1
+    mac_address: "02:42:ac:11:00:21"
+    ports:
+      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - ./data/instance-1/qq:/app/.config/QQ
+      - ./data/instance-1/config:/app/napcat/config
+      - ./data/instance-1/plugins:/app/napcat/plugins
+
+  napcat-2:
+    <<: *napcat-common
+    container_name: hds-napcat-2
+    hostname: napcat-2
+    mac_address: "02:42:ac:11:00:22"
+    ports:
+      - "127.0.0.1:3002:3001"
+      - "127.0.0.1:6100:6099"
+    volumes:
+      - ./data/instance-2/qq:/app/.config/QQ
+      - ./data/instance-2/config:/app/napcat/config
+      - ./data/instance-2/plugins:/app/napcat/plugins

@@ -1,4 +1,6 @@
 node_modules/
+.claude/
+*.tgz
 tsconfig.tsbuildinfo
 .local-hdsi/
 .env
@@ -20,5 +22,3 @@ credentials.*
 *.p12
 *.pfx
 .DS_Store
-.claude/
-*.tgz

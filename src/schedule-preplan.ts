@@ -31,6 +31,42 @@ const WEEKDAYS: SchedulePreplanWeekday[] = [
 const KINDS: SchedulePreplanBlockKind[] = ['fixed', 'routine', 'flexible', 'open']
 const PRIORITY: Record<SchedulePreplanBlockKind, number> = { fixed: 4, routine: 3, flexible: 2, open: 1 }
 
+/** @deprecated Legacy parser, not called by the runtime. Current profiles are
+ * interpreted by the contextual schedule planner without a fixed workweek.
+ * Extract only explicitly clocked weekday blocks from the character profile.
+ * This is deliberately host-side and narrow: an author-written schedule is
+ * stronger evidence than a background model guessing a routine from prose. */
+export function configuredWeekdaySchedule(profile: string | undefined, from: string): SchedulePreplanRegime | undefined {
+  const raw = profile?.trim() ?? ''
+  const heading = raw.indexOf('典型工作日日程')
+  if (heading < 0) return undefined
+  const afterHeading = raw.slice(heading)
+  const weekend = afterHeading.search(/(?:^|\n)\s*(?:[一二三四五六七八九十]+、\s*)?周末状态/mu)
+  const section = weekend < 0 ? afterHeading : afterHeading.slice(0, weekend)
+  const blocks: SchedulePreplanBlock[] = []
+  const pattern = /(?:^|\n)\s*(\d{1,2}:\d{2})\s*[—–-]\s*(\d{1,2}:\d{2})\s*[｜|]\s*([^\n]{1,120})/gu
+  for (const match of section.matchAll(pattern)) {
+    const start = normalizeClock(match[1])
+    const end = normalizeClock(match[2])
+    const label = text(match[3], 120)
+    if (!start || !end || start === end || !label) continue
+    const id = `configured-${start.replace(':', '')}-${end.replace(':', '')}-${slug(label, 42)}`
+    if (!id || blocks.some(block => block.id === id)) continue
+    blocks.push({ id, start, end, label, kind: 'routine', sourceEntryIds: [] })
+  }
+  if (!blocks.length) return undefined
+  const weekly = Object.fromEntries(
+    ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'].map(day => [day, blocks]),
+  ) as SchedulePreplanRegime['weekly']
+  return {
+    id: 'configured-weekday-routine',
+    label: '人物设定中的工作日日程',
+    from,
+    weekly,
+    sourceEntryIds: [],
+  }
+}
+
 export function resolveSchedulePreplanConfig(value?: Partial<SchedulePreplanConfig>): SchedulePreplanConfig {
   return {
     enabled: value?.enabled !== false,
@@ -121,8 +157,9 @@ export function applySchedulePreplanProposal(
   config: SchedulePreplanConfig,
   now: Date,
   variationLevel: SchedulePreplanConfig['variationLevel'] = 'stable',
+  authorProfileEvidence = false,
 ): SchedulePreplanRecord | undefined {
-  const proposal = normalizeProposal(proposalValue, new Set(evidence.map(entry => entry.id)), variationLevel)
+  const proposal = normalizeProposal(proposalValue, new Set(evidence.map(entry => entry.id)), variationLevel, authorProfileEvidence)
   if (!proposal) return current ? refreshSchedulePreplan(current, today, timezone, config, now, 'Invalid proposal ignored; existing Schedule Preplan retained.') : undefined
   if (proposal.outcome === 'unchanged' && current) {
     return {
@@ -150,7 +187,7 @@ export function applySchedulePreplanProposal(
         lastReviewedLocalDate: today,
         lastEvidenceEntryId: Math.max(...evidence.map(entry => entry.id), 0),
         reviewReason: proposal.reason,
-        regimes: [], exceptions: [], materializedDays: [], createdAt: now, updatedAt: now,
+        regimes: [], exceptions, materializedDays: materializeSchedulePreplan([], exceptions, today, config.horizonDays), createdAt: now, updatedAt: now,
       }
     }
     return refreshSchedulePreplan(current, today, timezone, config, now, 'Empty proposal ignored; existing Schedule Preplan retained.')
@@ -251,7 +288,7 @@ export function nextSchedulePreplanTransition(record: SchedulePreplanRecord | un
   return next == null ? undefined : new Date(now.getTime() + (next - current) * 60_000)
 }
 
-function normalizeProposal(value: unknown, validEvidenceIds: ReadonlySet<number>, variationLevel: SchedulePreplanConfig['variationLevel']): SchedulePreplanProposal | undefined {
+function normalizeProposal(value: unknown, validEvidenceIds: ReadonlySet<number>, variationLevel: SchedulePreplanConfig['variationLevel'], authorProfileEvidence = false): SchedulePreplanProposal | undefined {
   if (!isRecord(value) || !['unchanged', 'extend', 'patch', 'replace'].includes(String(value.outcome))) return undefined
   const outcome = value.outcome as SchedulePreplanProposal['outcome']
   const reason = text(value.reason, 500)
@@ -260,7 +297,7 @@ function normalizeProposal(value: unknown, validEvidenceIds: ReadonlySet<number>
   const allowTentative = variationLevel === 'granular'
   const regimes = normalizeRegimes(value.regimes, validEvidenceIds, allowTentative)
   const exceptions = normalizeExceptions(value.exceptions, validEvidenceIds, allowTentative)
-  if ((outcome === 'patch' || outcome === 'replace') && validEvidenceIds.size && !sourceEntryIds.length && !regimes.some(item => item.sourceEntryIds?.length) && !exceptions.some(item => item.sourceEntryIds?.length)) return undefined
+  if (!authorProfileEvidence && (outcome === 'patch' || outcome === 'replace') && validEvidenceIds.size && !sourceEntryIds.length && !regimes.some(item => item.sourceEntryIds?.length) && !exceptions.some(item => item.sourceEntryIds?.length)) return undefined
   return { outcome, reason, confidence: finite(value.confidence), sourceEntryIds, regimes, exceptions }
 }
 
@@ -389,6 +426,12 @@ function timeKey(value: unknown) {
   const match = /^(\d{2}):(\d{2})$/.exec(raw)
   if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) return undefined
   return raw
+}
+
+function normalizeClock(value: string | undefined) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value?.trim() ?? '')
+  if (!match) return undefined
+  return timeKey(`${match[1].padStart(2, '0')}:${match[2]}`)
 }
 
 function timeMinutes(value: string) {

@@ -1,12 +1,12 @@
 {
   "name": "koishi-plugin-hds-interlude",
-  "version": "0.1.4",
+  "version": "0.1.5-beta8-m6.custom.4",
   "description": "A time-aware, persistent narrative chat framework for Koishi.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit --incremental false --composite false --noUnusedLocals --noUnusedParameters",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node scripts/run-tests.mjs"
   },
   "files": [
     "lib",

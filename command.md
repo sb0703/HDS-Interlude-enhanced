@@ -1,6 +1,6 @@
 # HDS Interlude 管理与查看指令
 
-适用版本：`0.1.4`
+适用版本：`0.1.5-beta8-m6.custom.4`
 ## 使用前先看这里
 
 - 新手安装和首次测试：`BEGINNER_GUIDE.md`

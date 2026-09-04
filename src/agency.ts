@@ -10,6 +10,7 @@ export const DEFAULT_AGENCY_CONFIG: AgencyConfig = {
   maxWindowMinutes: 240,
   minimumProactiveIntervalMinutes: 60,
   maxCandidateHours: 24,
+  capacityPolicy: 'contextual',
 }
 
 export interface AgencyCapacityResult {
@@ -112,6 +113,7 @@ export function normalizeProactiveContact(
     participantId: String(value.participantId),
     origin: value.origin as ProactiveContactDraft['origin'],
     motive,
+    capacityReason: text(value.capacityReason, 600) || undefined,
     disclosure: value.disclosure as ProactiveContactDraft['disclosure'],
     sourceEntryIds,
     willingness: willingness === undefined ? undefined : clamp(willingness, 0, 1),
@@ -130,10 +132,13 @@ export function evaluateAgencyCapacity(
 ): AgencyCapacityResult {
   if (!window || new Date(window.validUntil) <= now) return { allowed: false, reason: 'agency-window-missing-or-expired' }
   const nextOpportunityAt = futureDate(window.nextOpportunityAt, now)
+  // Contextual exceptions are candidate-specific, never a persistent permission.
+  // The service enables them only when the independent semantic audit is on.
+  const contextual = config.capacityPolicy === 'contextual' && !!candidate.capacityReason?.trim()
   if (window.deviceAccess === 'unavailable') return { allowed: false, reason: 'device-unavailable', nextOpportunityAt }
-  if (window.deviceAccess === 'limited') return { allowed: false, reason: 'device-limited', nextOpportunityAt }
-  if (window.activityLoad === 'overloaded') return { allowed: false, reason: 'schedule-overloaded', nextOpportunityAt }
-  if (candidate.disclosure === 'personal' && window.privacy !== 'private') {
+  if (window.deviceAccess === 'limited' && !contextual) return { allowed: false, reason: 'device-limited', nextOpportunityAt }
+  if (window.activityLoad === 'overloaded' && !contextual) return { allowed: false, reason: 'schedule-overloaded', nextOpportunityAt }
+  if (candidate.disclosure === 'personal' && window.privacy !== 'private' && !contextual) {
     return { allowed: false, reason: 'privacy-insufficient', nextOpportunityAt }
   }
   const lastContact = toDate(lastCharacterMessageAt)
@@ -145,7 +150,7 @@ export function evaluateAgencyCapacity(
       nextOpportunityAt: new Date(lastContact.getTime() + minimumInterval),
     }
   }
-  if (window.activityLoad === 'occupied' && candidate.origin !== 'promise' && candidate.origin !== 'practical-update') {
+  if (window.activityLoad === 'occupied' && candidate.origin !== 'promise' && candidate.origin !== 'practical-update' && !contextual) {
     return { allowed: false, reason: 'schedule-occupied', nextOpportunityAt }
   }
   return { allowed: true, reason: 'capacity-available' }

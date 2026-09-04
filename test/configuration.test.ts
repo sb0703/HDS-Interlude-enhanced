@@ -8,7 +8,7 @@ import { HDS_INTERLUDE_VERSION } from '../src/meta'
 
 test('Console sections follow the documented setup order', () => {
   assert.deepEqual(Object.keys(Config.dict), [
-    'blindMode', 'storyDefaults', 'model', 'onebot', 'runtime', 'schedulePreplan', 'sharedStory', 'chatActions',
+    'blindMode', 'storyDefaults', 'model', 'onebot', 'runtime', 'timelineDirector', 'chatRhythm', 'schedulePreplan', 'sharedStory', 'chatActions',
     'stickers', 'agency', 'memory', 'alterSystem', 'browser', 'logging',
   ])
 })
@@ -37,11 +37,11 @@ test('HDSI declares itself reusable for isolated multi-character deployments', (
 test('shared command names resolve to the HDSI instance owned by the receiving bot', () => {
   const fallback = { character: 'fallback' }
   const targets = new Map([
-    ['90000000001', { character: '沈既明' }],
-    ['90000000002', { character: '周旭川' }],
+    ['90000000001', { character: '角色甲' }],
+    ['90000000002', { character: '角色乙' }],
   ])
-  assert.equal(resolveBotScopedTarget(targets, '90000000001', fallback).character, '沈既明')
-  assert.equal(resolveBotScopedTarget(targets, ' 90000000002 ', fallback).character, '周旭川')
+  assert.equal(resolveBotScopedTarget(targets, '90000000001', fallback).character, '角色甲')
+  assert.equal(resolveBotScopedTarget(targets, ' 90000000002 ', fallback).character, '角色乙')
   assert.equal(resolveBotScopedTarget(targets, 'unknown', fallback), fallback)
 })
 
@@ -53,7 +53,7 @@ test('reusable HDSI instances register shared commands on the unfiltered root co
 
 test('each HDSI instance emits logs under its own bot account category', () => {
   assert.equal(interludeLoggerName({
-    onebot: { enabled: true, botAccounts: [{ qq: '90000000002', label: '周', enabled: true }], userAccounts: [] },
+    onebot: { enabled: true, botAccounts: [{ qq: '90000000002', label: '测试角色', enabled: true }], userAccounts: [] },
     storyDefaults: { characterName: '周旭川' },
   } as any), 'hds-interlude.onebot.90000000002')
   assert.equal(interludeLoggerName({
@@ -97,7 +97,7 @@ test('ignored compatibility switches stay out of the active Console', () => {
 
 test('runtime and plugin exports share one version constant', () => {
   assert.equal(version, HDS_INTERLUDE_VERSION)
-  assert.equal(version, '0.1.4')
+  assert.equal(version, '0.1.5-beta8-m6.custom.4')
 })
 
 test('layered colored logs are the Console default and remain optional', () => {
@@ -168,11 +168,23 @@ test('DeepSeek official provider exposes independent thinking controls', () => {
   assert.equal(provider.deepseekReasoningEffort, 'low')
 })
 
-test('Agency Window exposes only the four bounded scheduling controls', () => {
+test('timeline director and ChatRhythm expose conservative top-level defaults', () => {
+  assert.equal(Config.dict.timelineDirector.dict.enabled.meta.default, true)
+  const rhythm = Config.dict.chatRhythm.dict
+  assert.equal(rhythm.enabled.meta.default, true)
+  assert.equal(rhythm.mode.meta.default, 'balanced')
+  assert.equal(rhythm.historyLimit.meta.default, 12)
+  assert.equal(rhythm.collapseMinSamples.meta.default, 5)
+  assert.equal(rhythm.interventionLimit.meta.default, 6)
+  assert.equal(rhythm.cooldownSamples.meta.default, 4)
+})
+
+test('Agency Window exposes contextual policy and bounded scheduling controls', () => {
   const agency = Config.dict.agency.dict
   assert.deepEqual(Object.keys(agency), [
-    'enabled', 'maxWindowMinutes', 'minimumProactiveIntervalMinutes', 'maxCandidateHours',
+    'capacityPolicy', 'enabled', 'maxWindowMinutes', 'minimumProactiveIntervalMinutes', 'maxCandidateHours',
   ])
+  assert.equal(agency.capacityPolicy.meta.default, 'contextual')
   assert.equal(agency.enabled.meta.default, true)
   assert.equal(agency.maxWindowMinutes.meta.default, 240)
 })
@@ -231,8 +243,8 @@ test('group transport accepts its explicit field and the legacy immediate intera
 
 test('reply-mode logs distinguish missing live replies from normal background silence', () => {
   assert.equal(visibleReplyMode({}, 'user-message'), '未提供或无效')
-  assert.equal(visibleReplyMode({}, 'conversation-follow-up'), '无可见投递')
-  assert.equal(visibleReplyMode({}, 'advance'), '无可见投递')
+  assert.equal(visibleReplyMode({}, 'conversation-follow-up'), '本轮未提出可见消息')
+  assert.equal(visibleReplyMode({}, 'advance'), '本轮未提出可见消息')
   assert.equal(visibleReplyMode({ crossConversationActions: [{ participantId: 'friend', mode: 'immediate', content: '在吗' }] }, 'advance'), '主动联系')
   assert.equal(visibleReplyMode({ interaction: { seen: true, reply: { mode: 'none' } } }, 'intent-due'), 'none')
 })

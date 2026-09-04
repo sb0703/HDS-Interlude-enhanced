@@ -45,7 +45,7 @@ Koishi 第一次启动会准备运行环境，耐心等待即可。
 
 ```powershell
 cd C:\Users\你的用户名\AppData\Roaming\Koishi\Desktop\data\instances\default
-npm install --save-exact C:\路径\koishi-plugin-hds-interlude-0.1.4.tgz
+npm install --save-exact C:\路径\koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz
 ```
 
 安装完成后回到 Koishi Console，添加或启用 `hds-interlude`。
