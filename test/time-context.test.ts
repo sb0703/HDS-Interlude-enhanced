@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { storyLocalTimeContext, toPromptPayload } from '../src/narrator'
-import { extractUserReportedTimes, normalizeDatabaseRow } from '../src/service'
+import { normalizeDatabaseRow } from '../src/service'
 import { formatLogTime, formatStoryDisplayTime, timeFormatterCacheSize } from '../src/time'
 import { emptyParticipantState, emptyStorySetting, emptyStoryState, InterludeStory, NarrativeRequest } from '../src/types'
 
@@ -84,21 +84,7 @@ test('timeline display uses the story timezone and prints its GMT offset', () =>
   assert.equal(formatStoryDisplayTime(new Date('2026-08-31T00:37:00.000Z'), 'Asia/Shanghai'), '2026-08-31 08:37:00 GMT+8')
 })
 
-test('explicit user-reported clocks stay distinct from the message receive time', () => {
-  const facts = extractUserReportedTimes('我下午6.30 开始吃，刚吃完', new Date('2026-08-31T11:36:00.000Z'), 'Asia/Shanghai')
-  assert.deepEqual(facts, [{ localTime: '2026-08-31 18:30', relation: 'past', statement: '我下午6.30 开始吃，刚吃完' }])
-})
 
-test('prompt payload keeps receive time and user-reported action time as separate fields', () => {
-  const now = new Date('2026-08-31T11:36:00.000Z')
-  const request = requestAt(now, now)
-  request.phase = 'user-message'
-  request.userMessage = '我下午6.30 开始吃，刚吃完'
-  request.userReportedTimes = extractUserReportedTimes(request.userMessage, now, 'Asia/Shanghai')
-  const payload = toPromptPayload(request)
-  assert.equal(payload.currentEvent.observedAtLocal, '2026-08-31 19:36:00')
-  assert.deepEqual(payload.currentEvent.userReportedTimes, [{ localTime: '2026-08-31 18:30', relation: 'past', statement: '我下午6.30 开始吃，刚吃完' }])
-})
 
 test('the current user message remains both a durable event and the explicit currentEvent', () => {
   const now = new Date('2026-08-23T08:00:00.000Z')

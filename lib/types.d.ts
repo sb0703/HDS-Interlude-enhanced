@@ -23,6 +23,8 @@ export interface StorySetting {
     timezone: string;
 }
 export interface StoryState {
+    /** Explicit recovery boundary; older rows stay available as an archive. */
+    timelineBoundary?: import('./timeline-boundary').TimelineBoundary;
     /** Evolving overlay. The original setting remains the story's canon/base. */
     settingOverlay: StorySettingOverlay;
     activeSceneId?: number;
@@ -152,6 +154,10 @@ export interface SchedulePreplanWindow {
     plannedNotObserved: true;
     revision: number;
     blocks: Array<SchedulePreplanBlock & {
+        date: string;
+    }>;
+    /** Plans ending during this narration interval, never observed completion. */
+    recentBlocks?: Array<SchedulePreplanBlock & {
         date: string;
     }>;
 }
@@ -695,7 +701,6 @@ export interface NarrativeRequest {
     characterReferenceImageEnabled?: boolean;
     /** Explicit clock references stated by the user in this one message. They
      * describe reported past/future events, not the message receive time. */
-    userReportedTimes?: UserReportedTime[];
     /** Native image inputs observed in this one incoming user event only. */
     images?: NarrativeImage[];
     /** Text-only observations produced by a separately configured visual model.

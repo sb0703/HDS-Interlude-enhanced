@@ -1,4 +1,4 @@
-import { ScriptEntry, TimelineBeat, WorkingDetail, WorkingDetailDraft } from './types'
+import { ScriptEntry, WorkingDetail, WorkingDetailDraft } from './types'
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -7,16 +7,12 @@ const record = (value: unknown): value is Record<string, unknown> => !!value && 
 export function recentContinuityContext(entries: ScriptEntry[], now: Date) {
   const history = entries.filter(entry => entry.occurredAt <= now)
     .sort((left, right) => left.occurredAt.getTime() - right.occurredAt.getTime() || left.id - right.id)
-  const windows = history.filter(entry => entry.kind === 'script' && record(entry.metadata?.timelinePlan)).slice(-3)
+  const windows = history.filter(entry => entry.kind === 'script' && entry.content.trim()).slice(-3)
   const narratedBeats = windows.flatMap(entry => {
-    const plan = entry.metadata.timelinePlan as Record<string, unknown>
-    if (!Array.isArray(plan.beats)) return []
-    return plan.beats.filter((beat): beat is TimelineBeat => record(beat)
-      && ['state', 'activity', 'thought'].includes(String(beat.kind))
-      && typeof beat.at === 'number' && Number.isFinite(beat.at) && beat.at >= 0 && beat.at <= 1
-      && typeof beat.summary === 'string' && !!beat.summary.trim())
-      .sort((left, right) => left.at - right.at).slice(0, 4)
-      .map(beat => ({ entryId: entry.id, participantId: entry.participantId, windowEndedAt: entry.occurredAt.toISOString(), kind: beat.kind, summary: beat.summary.trim().slice(0, 180) }))
+    // Preserve source language, including intentions and negation. A plan is
+    // never promoted to an observed event by the host.
+    return [{ entryId: entry.id, participantId: entry.participantId, windowEndedAt: entry.occurredAt.toISOString(), kind: 'prose',
+      summary: entry.content.length > 300 ? `[Earlier prose omitted]\n${entry.content.slice(-300)}` : entry.content }]
   })
   const lastBeat = narratedBeats.at(-1)
   const latestScript = history.filter(entry => entry.kind === 'script').at(-1)

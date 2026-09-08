@@ -26,8 +26,8 @@ const due = { id: 8, type: 'delayed-reply', participantId: 'p1', summary: '已�
 
 test('2117 to 2118: old judgements are historical, a prepared reply is not a sent reply', () => {
   const context = recentContinuityContext([sent, received, timelineEntryPromptProjection(planned)], now)
-  assert.equal(context.lastNarratedBeat?.summary, '拿起手机准备回复')
-  assert.equal(context.alreadyNarrated.length, 3)
+  assert.equal(context.lastNarratedBeat?.summary, planned.content)
+  assert.equal(context.alreadyNarrated.length, 1)
   assert.equal(context.alreadyNarrated[0].entryId, 2117)
   assert.deepEqual(context.deliveredMessages.map(item => [item.entryId, item.direction]), [[2115, 'sent'], [2116, 'received']])
   assert.ok(!JSON.stringify(context.deliveredMessages).includes('真摸鱼去了'))
@@ -85,14 +85,14 @@ test('continuity is bounded and cannot expose future or excluded participant his
   assert.ok(!serialized.includes('group-private'))
   assert.ok(!serialized.includes('future-message'))
   const lots = Array.from({ length: 20 }, (_, index) => ({ ...planned, id: index }))
-  assert.equal(recentContinuityContext(lots, now).alreadyNarrated.length, 8)
+  assert.equal(recentContinuityContext(lots, now).alreadyNarrated.length, 3)
 })
 
 test('a later live narrative supersedes the old automatic endpoint', () => {
   const later = entry(2118, 'script', '已经去会议室了。', {}, now)
   const context = recentContinuityContext([planned, later], now)
-  assert.equal(context.lastNarratedBeat, null)
-  assert.equal(context.alreadyNarrated.length, 3)
+  assert.equal(context.lastNarratedBeat?.summary, later.content)
+  assert.equal(context.alreadyNarrated.length, 2)
 })
 
 const details: WorkingDetail[] = [

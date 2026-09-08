@@ -1,4 +1,4 @@
-import { NarrativeDecision, NarrativeRequest, ScenePresenceDraft, TimelinePlan } from './types';
+import { NarrativeDecision, NarrativeRequest, ScenePresenceDraft, TimelinePlan, UserReportedTime } from './types';
 export interface ReviewDelivery {
     target: string;
     content: string;
@@ -8,21 +8,21 @@ export interface NarrativeReviewRequest {
     candidate: NarrativeDecision;
     allowedDeliveries: ReviewDelivery[];
     alreadyDelivered: ReviewDelivery[];
-    repetitionSignal?: {
+    retrievalHints?: Array<{
+        previousId: number;
         similarity: number;
-        previousId?: number;
-    };
-    clockSignal?: {
-        observed: string;
-        expected: string;
-        from: string;
-        explicitNow: boolean;
+    }>;
+    requireSemanticChecks?: boolean;
+    memoryAudit?: boolean;
+    memoryBaseline?: {
+        scene: unknown;
+        arc: unknown;
     };
     presenceUpdates?: ScenePresenceDraft[];
     evidenceCharacterBudget?: number;
 }
 export interface NarrativeReviewIssue {
-    target: 'plan' | 'script' | 'delivery' | 'presence';
+    target: 'plan' | 'script' | 'delivery' | 'presence' | 'expression';
     kind: 'state-conflict' | 'event-replay' | 'causality' | 'time' | 'delivery';
     candidateExcerpt: string;
     evidenceRefs: string[];
@@ -32,34 +32,40 @@ export interface NarrativeReviewIssue {
 export interface NarrativeReview {
     verdict: 'pass' | 'reject';
     issues: NarrativeReviewIssue[];
+    checks?: SemanticCheck[];
+    reportedTimes?: UserReportedTime[];
+}
+export interface SemanticCheck {
+    kind: 'time' | 'progression';
+    status: 'consistent' | 'uncertain' | 'conflict';
+    evidenceRefs: string[];
+    summary: string;
 }
 /** All semantic judgements use scoped evidence, never a universal routine. */
-export declare function narrativeReviewPrompt(): string;
+export declare function narrativeReviewPrompt(memoryAudit?: boolean): string;
 export declare function toNarrativeReviewPayload(request: NarrativeReviewRequest): {
     evidence: {
         ref: string;
         value: unknown;
     }[];
+    allowedEvidenceRefs: string[];
     candidate: {
         script: string;
         plan: TimelinePlan;
         presenceUpdates: ScenePresenceDraft[];
+        nativeFace: import("./types").NativeFaceDraft;
     };
-    repetitionSignal: {
+    memoryAudit: boolean;
+    requireSemanticChecks: boolean;
+    retrievalHints: {
+        previousId: number;
         similarity: number;
-        previousId?: number;
-    };
-    clockSignal: {
-        observed: string;
-        expected: string;
-        from: string;
-        explicitNow: boolean;
-    };
+    }[];
 };
 /** Missing or ungrounded reviewer output is unavailable, never pass. */
 export declare function normalizeNarrativeReview(value: unknown, request: NarrativeReviewRequest): NarrativeReview | undefined;
 /** A content-free diagnostic suitable for logs and a schema repair prompt. */
 export declare function narrativeReviewInvalidReason(value: unknown, request: NarrativeReviewRequest): string;
-export declare function narrativeReviewRepairPrompt(reason: string): string;
+export declare function narrativeReviewRepairPrompt(reason: string, request?: NarrativeReviewRequest): string;
 export declare function reviewRecoveryText(review: NarrativeReview): string;
 export declare function reviewNeedsReplan(review: NarrativeReview, plan: TimelinePlan | undefined): boolean;

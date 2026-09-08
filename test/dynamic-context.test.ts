@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { extractUserReportedTimes, narrativeClockConflict } from '../src/temporal-evidence'
 import { InterludeService, normalizeScenePresenceDrafts } from '../src/service'
 import { normalizeNarrativeReview, toNarrativeReviewPayload } from '../src/narrative-consistency'
 import { evaluateAgencyCapacity, normalizeProactiveContact, resolveAgencyConfig } from '../src/agency'
@@ -14,39 +13,8 @@ const entry = (id: number, content: string) => ({ id, storyId: 'story', particip
 const story = () => ({ id: 'story', setting: { ...emptyStorySetting(), timezone: zone }, state: emptyStoryState(), cursorAt: from })
 const remoteModel = { providers: [{ id: 'main', enabled: true, endpoint: 'https://example.invalid', apiKey: '', model: 'test' }] }
 
-test('relative and explicit dates do not become today', () => {
-  const cases = [
-    ['昨天18:30已经结束。', '2026-09-02 18:30', 'past'],
-    ['明天09:00见。', '2026-09-04 09:00', 'future'],
-    ['昨晚8点半回家。', '2026-09-02 20:30', 'past'],
-    ['2026年9月5日09:00见。', '2026-09-05 09:00', 'future'],
-  ]
-  for (const [text, expected, relation] of cases) {
-    const result = extractUserReportedTimes(text, now, zone)[0]
-    assert.equal(result?.localTime, expected, text)
-    assert.equal(result?.relation, relation, text)
-  }
-  assert.equal(extractUserReportedTimes('昨天23:50到的。', new Date('2027-01-01T00:10:00+08:00'), zone)[0]?.localTime, '2026-12-31 23:50')
-})
 
-test('numbers and unclear 12-hour clocks never become guessed facts', () => {
-  for (const text of ['价格6.30元。', '版本6.30', '重量6.30公斤。', '2026.09.03']) assert.deepEqual(extractUserReportedTimes(text, now, zone), [], text)
-  const ambiguous = extractUserReportedTimes('我6.30开始吃，刚吃完。', now, zone)[0]
-  assert.equal(ambiguous.relation, 'ambiguous')
-  assert.equal(ambiguous.localTime, undefined)
-  assert.deepEqual(ambiguous.alternatives, ['2026-09-03 06:30', '2026-09-03 18:30'])
-  assert.equal(extractUserReportedTimes('下周三09:00见。', now, zone)[0]?.relation, 'ambiguous')
-})
 
-test('chronological and midnight interval clocks are valid, explicit endpoint errors are signals', () => {
-  assert.equal(narrativeClockConflict('14:10，他看了一眼手表，出门办事。15:00，他结束采购。', from, now, zone), undefined)
-  const midnight = narrativeClockConflict('他看了一眼手表，23:55。', new Date('2026-09-02T23:50:00+08:00'), new Date('2026-09-03T00:10:00+08:00'), zone)
-  assert.equal(midnight, undefined)
-  assert.equal(narrativeClockConflict('他看了一眼手机，现在是15:40。', from, now, zone)?.explicitNow, true)
-  assert.equal(narrativeClockConflict('他看了一眼手机，现在是14:50。', from, now, zone)?.explicitNow, true)
-  assert.equal(narrativeClockConflict('他回想起昨天看表时的13:00。', from, now, zone), undefined)
-  assert.equal(narrativeClockConflict('他说：“手机上那条旧记录是13:00。”', from, now, zone), undefined)
-})
 
 function presenceHarness(review: unknown, config: any = { model: remoteModel }) {
   const service: any = Object.create(InterludeService.prototype)
@@ -83,7 +51,7 @@ test('arbitrary names and phrasing need exact evidence, not arrival/departure ke
 test('review retains a long event ending and prioritizes cited evidence over recent chatter', () => {
   const h = presenceHarness(undefined)
   const context: any = { ...h.context.compactRequest, recentEntries: [entry(1, '开始。' + '过程。'.repeat(1500) + '已离场，不再在办公室。'), ...Array.from({ length: 30 }, (_, i) => entry(i + 2, '聊天记录'))], participant: null, participants: [] }
-  const request: any = { context, candidate: {}, allowedDeliveries: [], alreadyDelivered: [], repetitionSignal: { similarity: 1, previousId: 1 }, evidenceCharacterBudget: 4000 }
+  const request: any = { context, candidate: {}, allowedDeliveries: [], alreadyDelivered: [], retrievalHints: [{ similarity: 1, previousId: 1 }], evidenceCharacterBudget: 4000 }
   const payload = toNarrativeReviewPayload(request)
   const history = payload.evidence.find(item => item.ref === 'history:1')?.value as any
   assert.equal(history.truncated, true)

@@ -11,7 +11,7 @@ const from = new Date('2026-09-03T08:49:20Z')
 const pass = { verdict: 'pass', issues: [] }
 const provider = { label: 'Audit', enabled: true, endpoint: 'https://example.test/chat', model: 'audit-model', temperature: 0.8, topP: 1, maxTokens: 4096, timeout: 1000, responseFormat: 'json-object', extraHeaders: '', extraBody: '', useForMain: true, useForCompaction: true }
 const model: any = { providers: [provider], consistencyReview: true, compaction: { responseFormat: 'json-object' }, failover: { enabled: true, strategy: 'priority', maxAttemptsPerProvider: 1, cooldownMinutes: 5 } }
-const story: InterludeStory = { id: 'story', platform: 'onebot', selfId: 'bot', userId: '', channelId: '', status: 'active', setting: { ...emptyStorySetting(), character: { name: '周旭川', profile: '医院管理者，工作安排可以因实际事务调整。' } }, state: emptyStoryState(), cursorAt: from, createdAt: from, updatedAt: from }
+const story: InterludeStory = { id: 'story', platform: 'onebot', selfId: 'bot', userId: '', channelId: '', status: 'active', setting: { ...emptyStorySetting(), character: { name: '测试人物甲', profile: '医院管理者，工作安排可以因实际事务调整。' } }, state: emptyStoryState(), cursorAt: from, createdAt: from, updatedAt: from }
 const plan: TimelinePlan = { beats: [{ at: 1, kind: 'state', summary: '会议仍在进行，未查看手机' }] }
 const context: NarrativeRequest = { story, phase: 'advance', from, now, participant: null, participants: [], shareParticipantDetails: false, dueIntents: [], activeConsequences: [], supersededIntents: [], memories: [], recentEntries: [], timelinePlan: plan }
 const candidate = { script: '他宣布散会，回到办公室，拿起手机发过去：“会开完了。”' }
@@ -32,7 +32,7 @@ test('review validation exposes content-free failure reasons and a grounded repa
   const prompt = narrativeReviewRepairPrompt('issue-0-excerpt-not-exact')
   assert.match(prompt, /byte-for-byte contiguous substring/)
   assert.match(prompt, /exactly equal one supplied evidence\[\]\.ref/)
-  assert.doesNotMatch(prompt, /周旭川|沈既明|医院|办公室/)
+  assert.doesNotMatch(prompt, /测试人物甲|测试人物乙|医院|办公室/)
 })
 
 test('review checks recipient and allowed transport without extracting messages for sending', () => {
@@ -76,7 +76,7 @@ test('roles and worlds come from context, including schedules that are not stand
   assert.match(prompt, /Same location, same action, same activity category/)
   assert.match(prompt, /Autonomous new events and spontaneous choices ARE allowed/)
   assert.match(prompt, /If evidence is insufficient or ambiguous/)
-  assert.doesNotMatch(prompt, /周旭川|沈既明|医院|办公室|咖啡|开会/)
+  assert.doesNotMatch(prompt, /测试人物甲|测试人物乙|医院|办公室|咖啡|开会/)
 })
 
 test('plan errors require replan; prose or delivery errors do not force scene changes', () => {
@@ -139,14 +139,18 @@ function harness(drafts: NarrativeDecision[], reviews: unknown[], plans: Timelin
   service.mainModelLabel = () => 'test'
   service.reportOperation = (...args: any[]) => logs.push(args.map(String).join(' '))
   service.report = (...args: any[]) => logs.push(args.map(String).join(' '))
-  service.narrativeRepetition = async () => ({ similarity: 0.99, previousId: 2117 })
   service.planAutomaticTimeline = async (...args: any[]) => { replans.push(args.at(-1)); return plans[Math.min(replans.length - 1, plans.length - 1)] }
   service.decide = async (...args: any[]) => {
     generations.push(args)
     args.at(-1)?.({ ...context, participants: [friend], contextualReview: true, phase: args[2], participant: args[1], timelinePlan: args[17] })
     return drafts[Math.min(generations.length - 1, drafts.length - 1)]
   }
-  service.compactor = { reviewNarrative: async (req: NarrativeReviewRequest) => { audits.push(req); return reviews[Math.min(audits.length - 1, reviews.length - 1)] } }
+  service.compactor = { reviewNarrative: async (req: NarrativeReviewRequest) => { audits.push(req); const result: any = reviews[Math.min(audits.length - 1, reviews.length - 1)];
+      if (!result?.verdict || !Array.isArray(result.issues)) return result;
+      return { ...result, reportedTimes: [], checks: ['time', 'progression'].map(kind => ({
+        kind, status: result.issues.some((issue: any) => (kind === 'time' ? ['time'] : ['event-replay', 'state-conflict', 'causality']).includes(issue.kind)) ? 'conflict' : 'consistent',
+        evidenceRefs: ['interval'], summary: 'Fixture contextual assessment',
+      })) } } }
   service.dbSet = async () => { throw new Error('review must never write') }
   return { service, logs, generations, audits, replans,
     run: (phase = 'advance', participant: unknown = null) => service.tryDecide(story, participant, phase, from, now, undefined, []) }
@@ -201,7 +205,7 @@ test('high text similarity alone cannot reject a contextually valid recurrence',
   const result = await h.run()
   assert.equal(result.succeeded, true)
   assert.equal(h.generations.length, 1)
-  assert.equal(h.audits[0].repetitionSignal?.similarity, 0.99)
+  assert.equal(h.audits[0].requireSemanticChecks, true)
 })
 
 test('audit receives normalized, authorized messages, not arbitrary targets or delayed drafts', async () => {

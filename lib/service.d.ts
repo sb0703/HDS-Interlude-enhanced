@@ -1,6 +1,6 @@
 import { Context, Service, Session } from 'koishi';
 import { ModelConfig } from './narrator';
-export { extractUserReportedTimes, narrativeClockConflict } from './temporal-evidence';
+export { temporalEvidence, normalizeUserReportedTimes } from './temporal-evidence';
 import { GroupWillingnessConfig } from './group-willingness';
 import { SchedulePreplanConfig } from './schedule-preplan';
 import { ImageSubject, InterludeArc, InterludeScene, InterludeParticipant, InterludeStory, NarrativeDecision, NarrativeFact, NarrativeIntent, GroupContext, NarrativeInteraction, NarrativeProvider, NarrativeRequest, NarrativeCompactor, NarrativeEmbedder, OutgoingMessageDraft, ScriptEntry, StatePatchProposal, StorySetting, StoryState, OverlaySnapshot, AlterSystemConfig, AgencyConfig, ScenePresenceState, ChatActionCapabilities, ChatReactionName, MessageReactionDraft, NativeFaceSemantic, QuotedMessageContext, SchedulePreplanRecord, TimelinePlan, ChatRhythmConfig } from './types';
@@ -647,7 +647,6 @@ export declare class InterludeService extends Service {
      * before persistence, so a rejected draft cannot create another durable
      * script row or advance the story clock. Participant branches remain private
      * while global entries stay visible to every branch in a shared story. */
-    private narrativeRepetition;
     private persistDecision;
     /** Keep the active-scene anchor in sync with the host ledger immediately,
      * rather than waiting for prose compaction to reconcile an already-completed
@@ -818,6 +817,7 @@ export declare class InterludeService extends Service {
     private prepareCompaction;
     /** Reuse the same semantic auditor for proposed memory transitions, outside
      * the normal background persistence lock. Missing review never changes a roster. */
+    private reviewCompactionMemory;
     private reviewCompactionPresence;
     /** Cheap DB persistence for one compaction decision. Re-acquires the story
      * serial queue in the caller so writes stay ordered with narrative turns. */
@@ -862,6 +862,8 @@ export declare class InterludeService extends Service {
      * errors receive a small bounded retry instead of aborting a user turn.
      */
     private dbRead;
+    private dbGetTimeline;
+    private recentTimelineEntries;
     private dbGet;
     /** Repair only a stale canonical story whose configured bot is no longer
      * online. A live OneBot session is stronger evidence than historical story
@@ -887,11 +889,11 @@ export declare function extractSessionVoiceCount(session: Pick<Session, 'content
 export declare function mergeUserMessageWithVoiceTranscripts(text: string, transcripts: string[], detected?: number): string;
 /**
  * A model's willingness is an intent estimate, not a transport permission.
- * Native faces need a visible-text counterpart so a model cannot turn every
- * routine reply into a face merely by returning willingness=1. The 0.90 cap
+ * Native faces require a nonempty reply; semantic suitability is reviewed
+ * independently from the structured proposal and its context. The 0.90 cap
  * deliberately makes thresholds above 0.90 an effective near-disable mode.
  */
-export declare function calibratedNativeFaceWillingness(semantic: NativeFaceSemantic, willingness: unknown, replyContent: unknown): number;
+export declare function calibratedNativeFaceWillingness(_semantic: NativeFaceSemantic, willingness: unknown, replyContent: unknown): number;
 /** The old punctuation-only id could collide (for example two filenames that
  * both normalize to bq--6-). Keep a readable path prefix, then append a
  * content hash fragment so every row is globally unique and stable for an
@@ -907,7 +909,7 @@ export declare function timelineRetryDelayMilliseconds(failures: number): number
 /** Automatic script prose is a rendering, not the next turn's temporal source.
  * A compact host ledger retains the real sequence without letting a previous
  * paragraph be copied into a new time window. */
-export declare function timelineEntryPromptProjection(entry: ScriptEntry): ScriptEntry;
+export declare function timelineEntryPromptProjection(entry: ScriptEntry, _preserveProse?: boolean): ScriptEntry;
 export declare function normalizeGroupChatActions(decision: NarrativeDecision, capabilities: ChatActionCapabilities | undefined, context: GroupContext): ExecutableGroupChatActions;
 export declare function formatGroupSpeaker(senderName: string, senderId: string): string;
 export declare function normalizeGroupVisibleReply(raw: NarrativeDecision['groupReply'], interaction: NarrativeDecision['interaction'], maxCharacters: number, separator?: string): string;
@@ -946,49 +948,6 @@ export declare function normalizeDatabaseRow(table: string, value: unknown): any
  * common failure mode where the model copies a scene and changes only 10:10 to
  * 10:20, while leaving meaningful wording and CJK characters intact. */
 export declare function normalizeNarrativeComparison(value: string): string;
-/** Automatic prose may render only the host-owned ledger. This catches common
- * lifecycle jumps such as a plan that stops at "started lunch" while prose
- * invents finishing lunch, leaving the cafeteria, or being back at the desk.
- * The check intentionally uses only clear start/finish markers so normal
- * descriptive wording does not become a false positive. */
-export declare function narrativeTimelinePlanConflict(script: string | undefined, plan: TimelinePlan | undefined, interaction?: NarrativeInteraction): {
-    lifecycle: string;
-    planned: string;
-    observed: string;
-};
-/** Guard an explicit configured routine after its window has passed. Unlike the
- * timeline ledger guard, this does not say the planned block happened; it only
- * rejects prose that starts the same routine implausibly late without showing
- * an observed reason (a delayed meeting, emergency, traffic, and so on). */
-export declare function narrativeScheduleWindowConflict(script: string | undefined, schedule: SchedulePreplanRecord | undefined, now: Date, timezone: string, interaction?: NarrativeInteraction): {
-    routine: string;
-    scheduled: string;
-    observed: string;
-    lateByMinutes: number;
-};
-/** Automatic windows should show a bounded slice of life, not a montage that
- * leaves one scene, crosses several places and returns to the start. This is
- * deliberately a prose safety net: the timeline ledger remains the primary
- * source of allowed events, while this catches a narrator that embellishes it
- * into extra commutes, arrivals and return trips. */
-export declare function narrativeAutomaticSceneLoop(script: string | undefined, from: Date, now: Date): {
-    locations: string[];
-    transitions: number;
-    elapsedMinutes: number;
-    returnedToStart: boolean;
-};
-/** Extract only coarse physical settings in their narrative order. The terms
- * are intentionally conservative; an unclassified place simply cannot cause
- * a false scene-loop rejection. */
-export declare function narrativeLocationSequence(value: string): string[];
-/** Recovery has a stricter contract than an ordinary next turn. Once a draft
- * has already been identified as a duplicate, a few new words or one extra
- * action marker are not enough: the rewrite must leave the old scene body. */
-export declare function narrativeRecoveryStillSimilar(repetition: {
-    coreSimilarity: number;
-    segmentOverlapRatio: number;
-    segmentOverlapCount: number;
-}): boolean;
 /** Compare sentence-sized scene facts independently. This catches a draft
  * that changes the first sentence or incoming quote while copying several
  * later physical-state/action sentences almost verbatim. The ratio is based
@@ -999,10 +958,10 @@ export declare function narrativeSegmentOverlap(left: string, right: string): {
     matchedSegments: number;
     novelRatio: number;
 };
-/** A scene may stay in one room while still moving forward. Treat a candidate
- * as progression when it introduces a concrete state/action change rather
- * than merely repeating the same setting and waiting posture. */
-export declare function narrativeHasProgression(current: string, previous: string): boolean;
+export declare function rankNarrativeHistory(script: string, entries: ScriptEntry[]): {
+    previousId: number;
+    similarity: number;
+}[];
 /** A blended character n-gram Jaccard score works for Chinese and prose with
  * spaces. Two-grams catch paraphrased shared anchors while three-grams keep
  * unrelated short overlaps from becoming a false duplicate. */

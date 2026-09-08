@@ -1,3 +1,4 @@
+import { TIMELINE_TABLES, normalizeTimelineBoundary, timelineBoundaryQuery } from './timeline-boundary'
 import { Context, h, Logger, Service, Session, Time } from 'koishi'
 import { registerTables } from './database'
 import { readFile, readdir, stat } from 'node:fs/promises'
@@ -14,13 +15,12 @@ import {
   activeAgencyWindow, evaluateAgencyCapacity, normalizeAgencyWindowDraft, normalizeAgencyWindowState,
   normalizeProactiveContact, proactiveCandidateFingerprint, proactiveRecheckAt, resolveAgencyConfig,
 } from './agency'
-import { extractUserReportedTimes, narrativeClockConflict } from './temporal-evidence'
-export { extractUserReportedTimes, narrativeClockConflict } from './temporal-evidence'
+export { temporalEvidence, normalizeUserReportedTimes } from './temporal-evidence'
 import { HDS_INTERLUDE_VERSION } from './meta'
 import { mergeWorkingDetails } from './continuity'
 import { NarrativeReviewRequest, ReviewDelivery, normalizeNarrativeReview, reviewNeedsReplan, reviewRecoveryText } from './narrative-consistency'
 import { formatLayeredLog, phaseLabel, renderLogMessage } from './logging'
-import { calendarDayKey, formatLogTime, localClockMinutes, storyLocalTimeContext } from './time'
+import { calendarDayKey, formatLogTime, localClockMinutes } from './time'
 import { consumeGroupWillingness, evaluateGroupWillingness, GroupWillingnessConfig, GroupWillingnessState } from './group-willingness'
 import { normalizeQQNativeFaceSegments } from './qq-face'
 import { chatRhythmPrompt, extractRhythmSignature, normalizeChatRhythmState, resolveChatRhythmConfig, updateChatRhythm } from './chat-rhythm'
@@ -972,9 +972,9 @@ export class InterludeService extends Service {
     const count = Math.max(1, Math.min(this.config.runtime.contextEntryLimit ?? 20, 200))
     const minutes = Math.max(0, Math.min(this.config.runtime.contextTimeWindowMinutes ?? 60, 1_440))
     const [countRows, timeRows] = await Promise.all([
-      this.dbGet('interlude_script_entry', { storyId }, { limit: count, sort: { occurredAt: 'desc' } }),
+      this.dbGetTimeline('interlude_script_entry', { storyId }, { limit: count, sort: { occurredAt: 'desc' } }),
       minutes > 0
-        ? this.dbGet('interlude_script_entry', { storyId, occurredAt: { $gte: new Date(now.getTime() - minutes * Time.minute) } }, { limit: 500, sort: { occurredAt: 'desc' } })
+        ? this.dbGetTimeline('interlude_script_entry', { storyId, occurredAt: { $gte: new Date(now.getTime() - minutes * Time.minute) } }, { limit: 500, sort: { occurredAt: 'desc' } })
         : Promise.resolve([] as ScriptEntry[]),
     ])
     const byId = new Map<number, ScriptEntry>()
@@ -984,7 +984,7 @@ export class InterludeService extends Service {
 
   async memories(storyId: string, limit = this.config.runtime.memoryLimit, participantId?: string) {
     const bounded = Math.max(1, Math.min(limit * 4, 500))
-    const rows = await this.dbGet('interlude_memory', { storyId, status: 'active' }, {
+    const rows = await this.dbGetTimeline('interlude_memory', { storyId, status: 'active' }, {
       limit: bounded,
       sort: { importance: 'desc', updatedAt: 'desc' },
     })
@@ -1078,21 +1078,26 @@ export class InterludeService extends Service {
     return this.serial(story.id, async () => {
       const current = await this.getStory(story.id)
       const now = new Date()
-      const latest = await this.dbGet('interlude_script_entry', { storyId: current.id }, { limit: 1, sort: { id: 'desc' } }) as ScriptEntry[]
+      const cutoffs = Object.fromEntries(await Promise.all(TIMELINE_TABLES.map(async table => {
+        const rows = await this.dbGet(table, { storyId: current.id }, { limit: 1, sort: { id: 'desc' } })
+        return [table, rows[0]?.id ?? 0]
+      })))
       const activeScene = await this.activeScene(current.id)
-      if (activeScene) {
-        await this.dbSet('interlude_scene', { id: activeScene.id }, {
-          hook: `Host timeline rebased at ${formatLogTime(now, current.setting.timezone)}.`,
-          summary: 'The host resumed the current timeline here. Earlier script remains archived context; no future statement from it is an event after this point.',
-          lastEntryId: latest[0]?.id ?? activeScene.lastEntryId,
-          entryCount: 0,
-          updatedAt: now,
+      const timelineBoundary = { at: now.toISOString(), cutoffs }
+      await this.dbSet('interlude_story', { id: current.id }, {
+        state: { ...emptyStoryState(), timelineBoundary, continuityDirty: true }, cursorAt: now, updatedAt: now,
+      })
+      for (const participant of await this.participants(current.id, true)) {
+        await this.dbSet('interlude_participant', { id: participant.id }, {
+          state: { ...normalizeParticipantState(participant.state), openThreads: [], relationshipNotes: [], relationshipOverlay: undefined, pendingReplyCount: 0 }, updatedAt: now,
         })
       }
-      const state = normalizeStoryState(current.state)
-      await this.dbSet('interlude_story', { id: current.id }, {
-        state: { ...state, workingDetails: [], timelineCarry: [], continuitySnapshot: undefined, continuityDirty: true }, cursorAt: now, updatedAt: now,
-      })
+      this.invalidateHistoryVectors(current.id)
+      this.compactionBackoff.delete(current.id)
+      const schedule = await this.getSchedulePreplan(current.id)
+      if (schedule) await this.saveSchedulePreplan({ ...schedule, regimes: [], exceptions: [], materializedDays: [],
+        lastEvidenceEntryId: cutoffs.interlude_script_entry, lastReviewedLocalDate: '', validThrough: '1970-01-01', updatedAt: now })
+      await this.ensureContinuity(await this.getStory(current.id), now)
       await this.appendEntry(current.id, {
         kind: 'timeline-rebase', actor: 'system', content: 'Host timeline rebased. Earlier narrative prose remains an archive and no longer defines future events.',
         occurredAt: now.toISOString(), metadata: { timelineRebase: true },
@@ -1622,7 +1627,7 @@ export class InterludeService extends Service {
     }
   }
   private async groupMessages(storyId: string, groupId: string, limit: number) {
-    const rows = await this.dbGet('interlude_script_entry', { storyId }, {
+    const rows = await this.dbGetTimeline('interlude_script_entry', { storyId }, {
       limit: Math.max(20, Math.min(200, limit * 8)), sort: { occurredAt: 'desc' },
     })
     return rows
@@ -1647,7 +1652,7 @@ export class InterludeService extends Service {
 
   private async groupCooldownActive(storyId: string, groupId: string, cooldownSeconds: number) {
     if (cooldownSeconds <= 0) return false
-    const rows = await this.dbGet('interlude_script_entry', { storyId }, {
+    const rows = await this.dbGetTimeline('interlude_script_entry', { storyId }, {
       limit: 100, sort: { occurredAt: 'desc' },
     })
     const latest = rows.find(entry => ['character-group-message', 'character-platform-action'].includes(entry.kind)
@@ -2014,7 +2019,7 @@ export class InterludeService extends Service {
   private async previousSceneSummaries(storyId: string): Promise<PreviousSceneSummary[]> {
     const limit = this.memoryConfig.previousSceneSummaries
     if (!limit || !this.memoryConfig.enabled) return []
-    const rows = await this.dbGet('interlude_scene', { storyId, status: 'closed' }, {
+    const rows = await this.dbGetTimeline('interlude_scene', { storyId, status: 'closed' }, {
       limit, sort: { endedAt: 'desc' },
     }) as InterludeScene[]
     return rows
@@ -2067,7 +2072,7 @@ export class InterludeService extends Service {
     const cache = new Map<number, HistoryVectorEntry>()
     this.historyVectors.set(storyId, cache)
     try {
-      const rows = await this.dbGet('interlude_script_entry', { storyId }) as ScriptEntry[]
+      const rows = await this.dbGetTimeline('interlude_script_entry', { storyId }) as ScriptEntry[]
       for (const row of rows) {
         if (!row.embedding?.length) continue
         if (!RECALLABLE_ENTRY_KINDS.includes(row.kind)) continue
@@ -2104,7 +2109,7 @@ export class InterludeService extends Service {
     if (!this.config.model.embedding?.semanticHistory) return
     const batchSize = this.config.model.embedding.backfillBatchSize ?? 5
     if (batchSize <= 0) return
-    const rows = await this.dbGet('interlude_script_entry', { storyId }, {
+    const rows = await this.dbGetTimeline('interlude_script_entry', { storyId }, {
       limit: 4_000, sort: { occurredAt: 'desc' },
     }) as ScriptEntry[]
     const cache = this.historyVectors.get(storyId)
@@ -2845,7 +2850,7 @@ export class InterludeService extends Service {
     // rows are context only and are never reinterpreted as a fresh message.
     const promptEntries = turnEntries
       .filter(entry => !!entry.content.trim())
-      .map(entry => timelineEntryPromptProjection(entry))
+      .map(entry => timelineEntryPromptProjection(entry, true))
     const participants = allParticipants
       .filter(item => item.id !== participant?.id && this.canHandleParticipant(item))
       .sort((left, right) => participantRelevance(right) - participantRelevance(left))
@@ -2872,12 +2877,9 @@ export class InterludeService extends Service {
       .sort((left, right) => left.accessedAt.getTime() - right.accessedAt.getTime())
       .slice(-Math.max(1, this.browserConfig.maxObservationsInPrompt))
     const refreshContinuity = this.shouldRefreshContinuity(story, phase)
-    const userReportedTimes = phase === 'user-message' && userMessage?.trim()
-      ? extractUserReportedTimes(userMessage, now, story.setting.timezone)
-      : undefined
     const request: NarrativeRequest = {
       contextualReview: usesRemoteProviders(this.config.model) && this.config.model.consistencyReview !== false,
-      phase, refreshContinuity, outputRecovery, outputRecoveryDraft, story, from, now, userMessage, userReportedTimes, images, visualObservations, timelinePlan, timelineFallback,
+      phase, refreshContinuity, outputRecovery, outputRecoveryDraft, story, from, now, userMessage, images, visualObservations, timelinePlan, timelineFallback,
       chatRhythm: this.chatRhythmConfig.enabled
         ? chatRhythmPrompt(normalizeChatRhythmState(story.state.chatRhythm, this.chatRhythmConfig), story.setting.character.name)
         : undefined,
@@ -2894,7 +2896,7 @@ export class InterludeService extends Service {
       shareParticipantDetails: this.sharedStoryConfig.shareParticipantDetails,
       recentEntries: promptEntries, memories, sceneContext: { scene, arc, ...(previousScenes.length ? { previousScenes } : {}) }, facts, groupContext, chatCapabilities,
       workingDetails: this.pruneWorkingDetails(normalizeStoryState(story.state).workingDetails, now),
-      timelineCarry: normalizeStoryState(story.state).timelineCarry,
+      timelineCarry: [],
       recalledHistory: participant && userMessage?.trim() && resolvedTurnEmbedding?.length
         ? await this.recallHistory(story.id, participant.id, resolvedTurnEmbedding, new Set(promptEntries.map(entry => entry.id)))
         : undefined,
@@ -2912,7 +2914,7 @@ export class InterludeService extends Service {
         ? normalizeStoryState(story.state).automaticDeliverySummaries
         : [],
       followUpCommitments,
-      schedulePreplan: schedulePreplanWindow(scheduleRecord, now, story.setting.timezone, 12, this.schedulePreplanConfig),
+      schedulePreplan: schedulePreplanWindow(scheduleRecord, now, story.setting.timezone, 12, this.schedulePreplanConfig, from),
       onEarlyReply, narrativeRecovery,
     }
     captureContext?.(request)
@@ -2953,8 +2955,8 @@ export class InterludeService extends Service {
     const visibleEntries = recentEntries.filter(entry => isHistoryEntryVisibleToParticipant(entry, participant?.id ?? '', this.sharedStoryConfig.shareParticipantDetails))
       .filter(entry => phase !== 'advance' || !['user-message', 'character-message', 'group-message', 'character-group-message'].includes(entry.kind))
     const request: TimelinePlanRequest = {
-      story, participant, phase, from, now, scene, facts, recentEntries: visibleEntries.map(entry => timelineEntryPromptProjection(entry)),
-      dueIntents, schedulePreplan: schedulePreplanWindow(scheduleRecord, now, story.setting.timezone, 12, this.schedulePreplanConfig), recovery,
+      story, participant, phase, from, now, scene, facts, recentEntries: visibleEntries.map(entry => timelineEntryPromptProjection(entry, true)),
+      dueIntents, schedulePreplan: schedulePreplanWindow(scheduleRecord, now, story.setting.timezone, 12, this.schedulePreplanConfig, from), recovery,
     }
     try {
       const rawPlan = await this.compactor.planTimeline(request)
@@ -3014,7 +3016,7 @@ export class InterludeService extends Service {
 
   /** Audit the exact privacy-filtered generation context and a read-only
    * preview of permitted transport. Never extract outgoing text from prose. */
-  private async reviewCandidate(context: NarrativeRequest, raw: NarrativeDecision, repetitionSignal: { similarity: number; previousId?: number }, clockSignal?: ReturnType<typeof narrativeClockConflict>) {
+  private async reviewCandidate(context: NarrativeRequest, raw: NarrativeDecision, retrievalHints: Array<{ previousId: number; similarity: number }>) {
     if (!this.compactor.reviewNarrative) throw new Error('Narrative consistency reviewer is unavailable.')
     const { story, participant, phase, from, now, dueIntents } = context
     const allParticipants = await this.participants(story.id)
@@ -3027,7 +3029,7 @@ export class InterludeService extends Service {
     const isAgencyCheck = dueIntents.length > 0 && dueIntents.every(intent => intent.type === 'proactive-check')
     let agencyAllows = !isAgencyCheck
     if (this.agencyConfig.enabled && (phase === 'advance' && decision.crossConversationActions.length || isAgencyCheck)) {
-      const entries = await this.recentEntries(story.id, Math.max(40, this.config.runtime.contextEntryLimit * 2))
+      const entries = await this.recentTimelineEntries(story.id, Math.max(40, this.config.runtime.contextEntryLimit * 2))
       // Placeholder for the not-yet-persisted script source; it never enters DB.
       const virtualId = Number.MAX_SAFE_INTEGER
       const sources = new Set([...entries.map(entry => entry.id), virtualId])
@@ -3059,7 +3061,7 @@ export class InterludeService extends Service {
         && entry.participantId === participant?.id && entry.occurredAt >= from && entry.occurredAt <= now)
         .map(entry => ({ target: entry.participantId, content: entry.content })))
     }
-    const request: NarrativeReviewRequest = { context, candidate: raw, allowedDeliveries, alreadyDelivered, repetitionSignal, clockSignal, evidenceCharacterBudget: this.config.model.consistencyReviewHistoryCharacters }
+    const request: NarrativeReviewRequest = { context, candidate: raw, allowedDeliveries, alreadyDelivered, retrievalHints, requireSemanticChecks: true, evidenceCharacterBudget: this.config.model.consistencyReviewHistoryCharacters }
     const review = normalizeNarrativeReview(await this.compactor.reviewNarrative(request), request)
     if (!review) throw new Error('Narrative consistency review unavailable or ungrounded; refusing to commit.')
     return review
@@ -3133,24 +3135,18 @@ export class InterludeService extends Service {
       if (usesRemoteProviders(this.config.model) && !hasRequiredNarrativeScript(decision)) {
         throw new Error('Narrative provider returned no usable script.')
       }
-      // Similarity is evidence for semantic review, not a role-blind veto.
-      // Numeric clocks remain a small deterministic boundary. Scene vocabulary
-      // and generic daily routines no longer decide whether a story is valid.
+      // All temporal and event meaning is assessed against the full context.
+      // Similarity ranks evidence only; it cannot veto or approve a narrative.
       for (let attempt = 0; ; attempt++) {
-        const repetition = await this.narrativeRepetition(story.id, participant?.id ?? '', decision.script, effectiveNow)
-        const clockConflict = narrativeClockConflict(decision.script, from, effectiveNow, story.setting.timezone)
         if (reviewEnabled && !reviewContext) throw new Error('Narrative review context was not captured.')
-        const review = reviewEnabled ? await this.reviewCandidate(reviewContext!, decision, repetition, clockConflict) : undefined
-        if (reviewEnabled ? review?.verdict === 'pass' : !clockConflict?.explicitNow) {
+        const review = reviewEnabled ? await this.reviewCandidate(reviewContext!, decision, rankNarrativeHistory(decision.script ?? '', reviewContext!.recentEntries)) : undefined
+        if (!reviewEnabled || review?.verdict === 'pass') {
           this.reportOperation('diagnostic', 'debug', story, phase, reviewEnabled
             ? '统一逻辑审核通过，本轮允许进入持久化与投递检查'
-            : '统一逻辑审核已关闭，仅检查通用时间及结构边界')
+            : '统一逻辑审核已关闭，本轮不进行语义时间或事件检测，仅检查结构边界')
           break
         }
-        const recovery = [
-          clockConflict ? '本轮当前时钟与宿主区间冲突：' + clockConflict.observed + '；正确端点：' + clockConflict.expected + '。保留历史时间的回忆框架，不得把过去或未来当现在。' : '',
-          review ? reviewRecoveryText(review) : '',
-        ].filter(Boolean).join('\n')
+        const recovery = review ? reviewRecoveryText(review) : ''
         this.reportOperation('standard', 'warn', story, phase, '逻辑一致性未通过 次数=%d 原因=%s', attempt + 1, recovery)
         if (attempt >= 1 || earlyReplyCommitted) {
           throw new Error('Narrative consistency guard rejected the candidate; no script commit or automatic backfill.')
@@ -3191,67 +3187,6 @@ export class InterludeService extends Service {
    * before persistence, so a rejected draft cannot create another durable
    * script row or advance the story clock. Participant branches remain private
    * while global entries stay visible to every branch in a shared story. */
-  private async narrativeRepetition(storyId: string, participantId: string, script: string | undefined, now: Date) {
-    const candidate = script?.trim() ?? ''
-    if (!candidate) return {
-      repeated: false, partialRepeated: false, stagnantTurns: 0, similarity: 0, coreSimilarity: 0,
-      segmentOverlapRatio: 0, segmentOverlapCount: 0,
-      previousId: undefined as number | undefined, ageSeconds: 0,
-    }
-    const rows = await this.dbGet('interlude_script_entry', { storyId }, {
-      limit: 12, sort: { occurredAt: 'desc' },
-    }) as ScriptEntry[]
-    const visible = rows.filter(entry => entry.kind === 'script'
-      && entry.content.trim()
-      && (!participantId || !entry.participantId || entry.participantId === participantId))
-    const comparisons = visible
-      .map(entry => {
-        const ageSeconds = Math.max(0, now.getTime() - entry.occurredAt.getTime()) / Time.second
-        const textScore = narrativeTextSimilarity(candidate, entry.content)
-        const coreScore = narrativeCoreSimilarity(candidate, entry.content)
-        const segmentOverlap = narrativeSegmentOverlap(candidate, entry.content)
-        return {
-          entry, ageSeconds, textScore, coreScore,
-          segmentOverlap,
-          score: Math.max(textScore, coreScore, segmentOverlap.ratio),
-          progressed: narrativeHasProgression(candidate, entry.content),
-        }
-      })
-      .filter(item => item.ageSeconds <= 90 * 60 && (item.score >= 0.58 || item.coreScore >= 0.72
-        || item.segmentOverlap.ratio >= 0.56 && item.segmentOverlap.matchedSegments >= 2))
-      .sort((left, right) => right.score - left.score || left.ageSeconds - right.ageSeconds)
-    const stagnant = comparisons.filter(item => !item.progressed
-      && (item.coreScore >= 0.68 || item.segmentOverlap.ratio >= 0.62 && item.segmentOverlap.matchedSegments >= 2))
-    const match = comparisons.find(item => !item.progressed
-      && item.ageSeconds <= 45 * 60
-      && (item.coreScore >= 0.78 || item.score >= 0.68
-        || item.segmentOverlap.ratio >= 0.62 && item.segmentOverlap.matchedSegments >= 2))
-    const partialMatch = comparisons.find(item => item.ageSeconds <= 45 * 60
-      && item.coreScore >= 0.6
-      && item.segmentOverlap.ratio >= 0.7
-      && item.segmentOverlap.matchedSegments >= 3
-      && item.segmentOverlap.novelRatio <= 0.38)
-    const previousId = match?.entry.id
-    const selected = match ?? partialMatch
-    const similarity = selected?.score ?? comparisons[0]?.score ?? 0
-    const coreSimilarity = selected?.coreScore ?? comparisons[0]?.coreScore ?? 0
-    const segmentOverlapRatio = selected?.segmentOverlap.ratio ?? comparisons[0]?.segmentOverlap.ratio ?? 0
-    const segmentOverlapCount = selected?.segmentOverlap.matchedSegments ?? comparisons[0]?.segmentOverlap.matchedSegments ?? 0
-    const ageSeconds = Math.round(selected?.ageSeconds ?? comparisons[0]?.ageSeconds ?? 0)
-    return {
-      repeated: !!match,
-      partialRepeated: !!partialMatch && !match,
-      stagnantTurns: stagnant.length,
-      similarity,
-      coreSimilarity,
-      segmentOverlapRatio,
-      segmentOverlapCount,
-      previousId: previousId ?? partialMatch?.entry.id,
-      ageSeconds,
-      progressed: match?.progressed ?? comparisons[0]?.progressed ?? false,
-    }
-  }
-
   private async persistDecision(
     story: InterludeStory,
     participant: InterludeParticipant | null,
@@ -3338,12 +3273,12 @@ export class InterludeService extends Service {
       const alterTurn = this.updateAlterSystem(story, state.alterSystem, decision.alter, phase, now)
       nextState.alterSystem = alterTurn?.state ?? state.alterSystem
       if (timelinePlan) {
-        nextState.timelineCarry = normalizeTimelineCarry(timelinePlan.carry)
-        await this.persistTimelineSceneAnchor(story.id, timelinePlan, now)
+        nextState.timelineCarry = []
+        await this.persistTimelineSceneAnchor(story.id, decision.script, now)
       }
       if (this.agencyConfig.enabled && (phase === 'advance' || isAgencyCheck)) {
         const sourceEntries = decision.agencyWindow || decision.proactiveContact
-          ? await this.recentEntries(story.id, Math.max(40, this.config.runtime.contextEntryLimit * 2))
+          ? await this.recentTimelineEntries(story.id, Math.max(40, this.config.runtime.contextEntryLimit * 2))
           : []
         const validSourceEntryIds = new Set(sourceEntries.map(entry => entry.id))
         if (scriptEntry?.id) validSourceEntryIds.add(scriptEntry.id)
@@ -3518,17 +3453,12 @@ export class InterludeService extends Service {
   /** Keep the active-scene anchor in sync with the host ledger immediately,
    * rather than waiting for prose compaction to reconcile an already-completed
    * automatic window. */
-  private async persistTimelineSceneAnchor(storyId: string, plan: TimelinePlan, now: Date) {
+  private async persistTimelineSceneAnchor(storyId: string, prose: string, now: Date) {
     const scene = await this.activeScene(storyId)
-    const lastBeat = plan.beats[plan.beats.length - 1]
-    if (!scene || !lastBeat) return
-    const carry = normalizeTimelineCarry(plan.carry)
-    const summary = [
-      `Host timeline latest completed state: ${lastBeat.summary}`,
-      ...(carry.length ? [`Unresolved current state: ${carry.join(' | ')}`] : []),
-    ].join('\n')
+    if (!scene || !prose.trim()) return
+    const summary = `Latest persisted narrative excerpt; interpret intentions and completed actions from the text:\n${prose.slice(-Math.max(1, this.memoryConfig.sceneSummaryCharacters - 120))}`
     await this.dbSet('interlude_scene', { id: scene.id }, {
-      hook: clip(lastBeat.summary, this.memoryConfig.sceneHookCharacters),
+      hook: '',
       summary: clip(summary, this.memoryConfig.sceneSummaryCharacters),
       updatedAt: now,
     })
@@ -3621,7 +3551,7 @@ export class InterludeService extends Service {
     const triggerValue = state.alterValue
     const triggerDirection = Math.sign(triggerValue) as -1 | 1
     try {
-      const scripts = (await this.recentEntries(story.id, 50))
+      const scripts = (await this.recentTimelineEntries(story.id, 50))
         .filter(entry => entry.kind === 'script' && entry.content.trim() && (!entry.participantId || entry.participantId === participantId))
         .slice(-10)
         .map(entry => ({ content: entry.content.slice(0, 4_000), occurredAt: entry.occurredAt.toISOString() }))
@@ -3685,13 +3615,13 @@ export class InterludeService extends Service {
     const candidateLimit = Math.max(20, Math.min(limit * 5, this.memoryConfig.maxFactsPerStory, 300))
     const laneLimit = Math.max(1, Math.min(5, Math.floor(limit / 4) || 1))
     const [rows, recentResolvedEvents, openPromises] = await Promise.all([
-      this.dbGet('interlude_fact', { storyId, status: 'active' }, {
+      this.dbGetTimeline('interlude_fact', { storyId, status: 'active' }, {
         limit: candidateLimit, sort: { importance: 'desc', updatedAt: 'desc' },
       }),
-      this.dbGet('interlude_fact', { storyId, status: 'active', scope: 'event', unresolved: false }, {
+      this.dbGetTimeline('interlude_fact', { storyId, status: 'active', scope: 'event', unresolved: false }, {
         limit: laneLimit * 2, sort: { updatedAt: 'desc' },
       }),
-      this.dbGet('interlude_fact', { storyId, status: 'active', scope: 'promise', unresolved: true }, {
+      this.dbGetTimeline('interlude_fact', { storyId, status: 'active', scope: 'promise', unresolved: true }, {
         limit: laneLimit * 2, sort: { updatedAt: 'desc' },
       }),
     ])
@@ -3735,7 +3665,7 @@ export class InterludeService extends Service {
     // feature is disabled, which is the default for most installations.
     if (!this.browserConfig.enabled) return []
     const limit = Math.max(1, Math.min(this.browserConfig.maxObservationsInPrompt, 20))
-    const rows = await this.dbGet('interlude_web_observation', { storyId }, {
+    const rows = await this.dbGetTimeline('interlude_web_observation', { storyId }, {
       limit: Math.max(limit * 4, 20), sort: { accessedAt: 'desc' },
     })
     return rows
@@ -3750,7 +3680,7 @@ export class InterludeService extends Service {
   }
 
   async activeScene(storyId: string): Promise<InterludeScene | null> {
-    const rows = await this.dbGet('interlude_scene', { storyId, status: 'active' }, {
+    const rows = await this.dbGetTimeline('interlude_scene', { storyId, status: 'active' }, {
       limit: 1,
       sort: { updatedAt: 'desc' },
     })
@@ -3758,7 +3688,7 @@ export class InterludeService extends Service {
   }
 
   async activeArc(storyId: string): Promise<InterludeArc | null> {
-    const rows = await this.dbGet('interlude_arc', { storyId, status: 'active' }, {
+    const rows = await this.dbGetTimeline('interlude_arc', { storyId, status: 'active' }, {
       limit: 1,
       sort: { updatedAt: 'desc' },
     })
@@ -3795,7 +3725,7 @@ export class InterludeService extends Service {
    * their existing behaviour without a migration. */
   private async activeConsequencesAndExpire(storyId: string, now: Date, participantId?: string) {
     if (!this.memoryConfig.activeConsequencesEnabled) return []
-    const rows = await this.dbGet('interlude_intent', { storyId, status: 'pending' }, {
+    const rows = await this.dbGetTimeline('interlude_intent', { storyId, status: 'pending' }, {
       limit: 100, sort: { updatedAt: 'desc' },
     })
     const consequences = rows.filter(isActiveConsequence)
@@ -3821,7 +3751,7 @@ export class InterludeService extends Service {
   private async applyIntentUpdates(storyId: string, updates: ReturnType<typeof normalizeIntentUpdates>, now: Date, participantId?: string) {
     if (!updates.length) return false
     const ids = updates.map(update => update.id)
-    const rows = await this.dbGet('interlude_intent', { storyId, id: { $in: ids }, status: 'pending' })
+    const rows = await this.dbGetTimeline('interlude_intent', { storyId, id: { $in: ids }, status: 'pending' })
     const allowed = new Map(rows
       .filter(isActiveConsequence)
       .filter(intent => !participantId || !intent.participantId || intent.participantId === participantId)
@@ -3984,7 +3914,7 @@ export class InterludeService extends Service {
     const minutes = this.browserConfig.cacheMinutes
     if (minutes <= 0) return undefined
     const cutoff = new Date(now.getTime() - minutes * Time.minute)
-    const rows = await this.dbGet('interlude_web_observation', { storyId, participantId, status: 'success' }, {
+    const rows = await this.dbGetTimeline('interlude_web_observation', { storyId, participantId, status: 'success' }, {
       limit: 20, sort: { accessedAt: 'desc' },
     })
     return rows.find(observation => observation.accessedAt >= cutoff
@@ -4008,7 +3938,7 @@ export class InterludeService extends Service {
   private async scheduleNarrativeRetry(storyId: string, participantId: string, now: Date, previousAttempts = 0) {
     const delaySeconds = Math.max(5, this.config.runtime.narrativeRetryDelaySeconds ?? 60)
     const maxAttempts = Math.max(0, this.config.runtime.narrativeRetryMaxAttempts ?? 6)
-    const pending = await this.dbGet('interlude_intent', { storyId, participantId, status: 'pending' })
+    const pending = await this.dbGetTimeline('interlude_intent', { storyId, participantId, status: 'pending' })
     const existing = pending.filter(intent => intent.type === 'narrative-retry')
     if (existing.length) await this.dbSet('interlude_intent', { id: { $in: existing.map(intent => intent.id) } }, { status: 'cancelled', updatedAt: now })
     if (!participantId || previousAttempts >= maxAttempts) {
@@ -4028,7 +3958,7 @@ export class InterludeService extends Service {
   }
 
   private async dueIntents(storyId: string, now: Date) {
-    const intents = await this.dbGet('interlude_intent', { storyId, status: 'pending', notBefore: { $lte: now } }, {
+    const intents = await this.dbGetTimeline('interlude_intent', { storyId, status: 'pending', notBefore: { $lte: now } }, {
       sort: { notBefore: 'asc' },
     })
     const expiredAgency = intents.filter(intent => intent.type === 'proactive-check'
@@ -4041,7 +3971,7 @@ export class InterludeService extends Service {
   }
 
   private async upcomingNarrativeIntents(storyId: string, now: Date) {
-    const rows = await this.dbGet('interlude_intent', {
+    const rows = await this.dbGetTimeline('interlude_intent', {
       storyId, status: 'pending', notBefore: { $gt: now },
     }, { sort: { notBefore: 'asc' }, limit: 30 }) as NarrativeIntent[]
     const internal = new Set(['split-message', 'browser-research', 'narrative-retry', 'proactive-check', 'active-consequence'])
@@ -4087,7 +4017,7 @@ export class InterludeService extends Service {
   }
 
   private async scheduleNextSplitWake(storyId: string) {
-    const pending = await this.dbGet('interlude_intent', { storyId, status: 'pending', type: 'split-message' }, {
+    const pending = await this.dbGetTimeline('interlude_intent', { storyId, status: 'pending', type: 'split-message' }, {
       sort: { notBefore: 'asc' }, limit: 1,
     })
     const next = pending[0]
@@ -4099,7 +4029,7 @@ export class InterludeService extends Service {
     await this.serial(storyId, async () => {
       const story = await this.getStory(storyId)
       const now = new Date()
-      const due = await this.dbGet('interlude_intent', {
+      const due = await this.dbGetTimeline('interlude_intent', {
         storyId, status: 'pending', type: 'split-message', notBefore: { $lte: now },
       }, { sort: { notBefore: 'asc' }, limit: 20 })
       const next = due[0]
@@ -4164,7 +4094,7 @@ export class InterludeService extends Service {
 
   /** Pending spoken promises are intentionally tiny and relationship-local. */
   private async pendingFollowUpCommitments(storyId: string, participantId: string) {
-    return this.dbGet('interlude_intent', {
+    return this.dbGetTimeline('interlude_intent', {
       storyId, participantId, type: 'follow-up-commitment', status: 'pending',
     }, { limit: 2, sort: { notBefore: 'asc' } }) as Promise<NarrativeIntent[]>
   }
@@ -4176,7 +4106,7 @@ export class InterludeService extends Service {
     fallbackSourceEntryId: number | undefined,
     now: Date,
   ) {
-    const pending = await this.dbGet('interlude_intent', {
+    const pending = await this.dbGetTimeline('interlude_intent', {
       storyId: story.id, participantId, type: 'follow-up-commitment', status: 'pending',
     }, { limit: 3, sort: { notBefore: 'asc' } }) as NarrativeIntent[]
     const key = normalizeFollowUpSummary(draft.summary)
@@ -4212,7 +4142,7 @@ export class InterludeService extends Service {
   ) {
     if (!resolutions.length || interaction?.reply.mode !== 'immediate' || !interaction.reply.content?.trim()) return new Set<number>()
     const ids = resolutions.map(item => item.id)
-    const rows = await this.dbGet('interlude_intent', {
+    const rows = await this.dbGetTimeline('interlude_intent', {
       storyId, participantId, type: 'follow-up-commitment', status: 'pending', id: { $in: ids },
     }) as NarrativeIntent[]
     const resolved = new Set<number>()
@@ -4275,7 +4205,7 @@ export class InterludeService extends Service {
     const expiresAt = toDate(candidate.expiresAt)
     if (!expiresAt || expiresAt <= now || notBefore >= expiresAt) return
     const fingerprint = proactiveCandidateFingerprint(candidate)
-    const pending = await this.dbGet('interlude_intent', {
+    const pending = await this.dbGetTimeline('interlude_intent', {
       storyId: story.id,
       participantId: candidate.participantId,
       status: 'pending',
@@ -4312,7 +4242,7 @@ export class InterludeService extends Service {
   private async cancelPendingOutgoingMessages(storyId: string, participantId: string, now: Date, cancelPlanned = true) {
     let completed = false
     try {
-      const intents = await this.dbGet('interlude_intent', { storyId, participantId, status: 'pending' })
+      const intents = await this.dbGetTimeline('interlude_intent', { storyId, participantId, status: 'pending' })
       const matching = intents.filter(intent => intent.participantId === participantId && (
         intent.type === 'split-message'
         || cancelPlanned && (intent.type === 'delayed-reply' || intent.type === 'cross-conversation-message')
@@ -4517,7 +4447,7 @@ export class InterludeService extends Service {
   private async resolveLiteralQuoteMessageId(storyId: string, participantId: string, content: string) {
     const quoted = literalQuoteText(content)
     if (!quoted) return undefined
-    const entries = await this.dbGet('interlude_script_entry', { storyId, participantId }, {
+    const entries = await this.dbGetTimeline('interlude_script_entry', { storyId, participantId }, {
       limit: 120, sort: { occurredAt: 'desc' },
     }) as ScriptEntry[]
     const matched = entries.find(entry => entry.content.trim() === quoted && targetableMessageId(entry.metadata?.messageId))
@@ -5062,6 +4992,7 @@ export class InterludeService extends Service {
         if (context) {
           try {
             decision = await this.compactor.compact(context.compactRequest)
+            await this.reviewCompactionMemory(context, decision)
             context.reviewedPresence = await this.reviewCompactionPresence(context, decision)
           } catch (error) {
             compactionError = error
@@ -5201,7 +5132,7 @@ export class InterludeService extends Service {
   private async schedulePreplanEvidence(storyId: string, afterEntryId: number) {
     const filter: any = { storyId, kind: 'script' }
     if (afterEntryId > 0) filter.id = { $gt: afterEntryId }
-    const entries = await this.dbGet('interlude_script_entry', filter, { sort: { occurredAt: 'asc' }, limit: 60 }) as ScriptEntry[]
+    const entries = await this.dbGetTimeline('interlude_script_entry', filter, { sort: { occurredAt: 'asc' }, limit: 60 }) as ScriptEntry[]
     if (this.sharedStoryConfig.shareParticipantDetails) return entries
     // A recurring schedule belongs to the protagonist, but raw private prose
     // must not be sent to the background schedule model. Automatic scripts
@@ -5278,6 +5209,7 @@ export class InterludeService extends Service {
     const live = await this.getSchedulePreplan(story.id)
     const liveStory = await this.getStory(story.id)
     if (live?.revision !== review.current?.revision
+      || liveStory.state.timelineBoundary?.at !== story.state.timelineBoundary?.at
       || liveStory.setting.character.profile !== story.setting.character.profile
       || liveStory.setting.timezone !== story.setting.timezone) {
       this.reportOperation('diagnostic', 'debug', story, 'advance', '日程已更新，忽略旧的后台审核结果')
@@ -5285,26 +5217,11 @@ export class InterludeService extends Service {
     }
     const next = applySchedulePreplanProposal(
       review.current, proposal, review.evidenceEntries, review.localDate,
-      story.setting.timezone, this.schedulePreplanConfig, now, this.schedulePreplanConfig.variationLevel,
+      story.setting.timezone, this.schedulePreplanConfig, now, this.schedulePreplanConfig.variationLevel, true,
     )
     if (!next) {
-      // A narrow review can still fail on an unstable provider. On first use,
-      // persist an explicit empty review with the inspected evidence cursor:
-      // this is truthful, prevents a full retry loop, and new evidence will
-      // naturally make the next review due again.
-      if (!review.current) {
-        const empty = applySchedulePreplanProposal(
-          undefined,
-          { outcome: 'replace', reason: 'Schedule review returned no valid structure; waiting for new concrete evidence.', regimes: [], exceptions: [] },
-          review.evidenceEntries, review.localDate, story.setting.timezone, this.schedulePreplanConfig, now, this.schedulePreplanConfig.variationLevel,
-        )
-        if (empty) {
-          empty.storyId = story.id
-          await this.saveSchedulePreplan(empty)
-          this.reportOperation('standard', 'warn', story, 'advance', 'Schedule Preplan 未形成有效日程，已保存空审查记录并等待新证据')
-          return true
-        }
-      }
+      // Missing/invalid output is not an explicit finding of no routine.
+      // Return failure so both first-use and existing records get retry backoff.
       this.reportOperation('standard', 'warn', story, 'advance', 'Schedule Preplan 未更新：模型没有返回可用日程，保留现有版本')
       return false
     }
@@ -5320,7 +5237,7 @@ export class InterludeService extends Service {
     const delaySeconds = Math.max(5, this.config.runtime.narrativeRetryDelaySeconds ?? 60)
     const maxAttempts = Math.min(2, Math.max(0, this.config.runtime.narrativeRetryMaxAttempts ?? 6))
     if (!participantId || previousAttempts >= maxAttempts) return false
-    const pending = await this.dbGet('interlude_intent', { storyId, participantId, status: 'pending', type: 'narrative-retry' }) as NarrativeIntent[]
+    const pending = await this.dbGetTimeline('interlude_intent', { storyId, participantId, status: 'pending', type: 'narrative-retry' }) as NarrativeIntent[]
     const existing = pending.filter(intent => intent.payload?.streamRecovery === true)
     if (existing.length) await this.dbSet('interlude_intent', { id: { $in: existing.map(intent => intent.id) } }, { status: 'cancelled', updatedAt: now })
     const attempt = previousAttempts + 1
@@ -5371,6 +5288,7 @@ export class InterludeService extends Service {
     let decision: CompactionDecision = {}
     try {
       decision = await this.compactor.compact(context.compactRequest)
+      await this.reviewCompactionMemory(context, decision)
       context.reviewedPresence = await this.reviewCompactionPresence(context, decision)
     } catch (error) {
       this.noteCompactionFailure(story.id, context.fingerprint, error)
@@ -5412,7 +5330,7 @@ export class InterludeService extends Service {
     // lastEntryId 将场景摘要变成增量检查点：已经压缩过的原文不再重复传给模型。
     const entryFilter: any = { storyId: story.id, occurredAt: { $gte: scene.startedAt } }
     if (scene.lastEntryId != null) entryFilter.id = { $gt: scene.lastEntryId }
-    const entries = await this.dbGet('interlude_script_entry', entryFilter, {
+    const entries = await this.dbGetTimeline('interlude_script_entry', entryFilter, {
       limit: Math.max(this.memoryConfig.compactionEntryLimit * 2, this.memoryConfig.compactionEntryLimit),
       sort: { occurredAt: 'asc' },
     })
@@ -5452,6 +5370,35 @@ export class InterludeService extends Service {
 
   /** Reuse the same semantic auditor for proposed memory transitions, outside
    * the normal background persistence lock. Missing review never changes a roster. */
+  private async reviewCompactionMemory(context: PreparedCompactionRun, decision: CompactionDecision): Promise<void> {
+    const { compactRequest } = context
+    if (compactRequest.entries.reduce((total, entry) => total + entry.content.length, 0) > 200000) {
+      throw new Error('Memory evidence exceeds audit budget; retaining originals without partial verification.')
+    }
+    const ids = new Set(compactRequest.entries.filter(entry => entry.occurredAt <= compactRequest.now).map(entry => entry.id))
+    for (const draft of [...(decision.facts ?? []), ...(decision.statePatches ?? []), ...(decision.workingDetails ?? [])]) {
+      if (!draft.sourceEntryIds?.length || !draft.sourceEntryIds.every(id => ids.has(id))) {
+        throw new Error('Memory proposal has missing or unknown source entries; retaining originals.')
+      }
+    }
+    if (usesRemoteProviders(this.config.model)) {
+      if (!this.compactor.reviewNarrative) throw new Error('Memory consistency reviewer unavailable; retaining original entries.')
+      const request: NarrativeReviewRequest = {
+        context: { story: { ...compactRequest.story, setting: { ...compactRequest.story.setting, user: { displayName: '', profile: '' }, relationship: '' } }, phase: 'advance', from: compactRequest.from, now: compactRequest.now,
+          participant: null, participants: [], shareParticipantDetails: false, dueIntents: [], activeConsequences: [],
+          supersededIntents: [], memories: [], recentEntries: compactRequest.entries, facts: compactRequest.facts },
+        candidate: { script: JSON.stringify({ scene: decision.scene, arc: decision.arc, facts: decision.facts,
+          statePatches: decision.statePatches, workingDetails: decision.workingDetails }) },
+        memoryAudit: true, memoryBaseline: { scene: compactRequest.scene, arc: compactRequest.arc }, requireSemanticChecks: true, allowedDeliveries: [], alreadyDelivered: [],
+        evidenceCharacterBudget: 200000,
+      }
+      const review = normalizeNarrativeReview(await this.compactor.reviewNarrative(request), request)
+      if (review?.verdict !== 'pass' || review.checks?.some(check => check.status !== 'consistent')) {
+        throw new Error('Memory consistency audit did not verify the proposal; retaining original entries for retry.')
+      }
+    }
+  }
+
   private async reviewCompactionPresence(context: PreparedCompactionRun, decision: CompactionDecision): Promise<ScenePresenceState[]> {
     const { compactRequest } = context
     const drafts = decision.scene?.presence ?? []
@@ -5482,6 +5429,10 @@ export class InterludeService extends Service {
   /** Cheap DB persistence for one compaction decision. Re-acquires the story
    * serial queue in the caller so writes stay ordered with narrative turns. */
   private async applyCompaction(story: InterludeStory, context: PreparedCompactionRun, decision: CompactionDecision, now: Date, startedAt: number) {
+    const live = await this.getStory(story.id)
+    if (live.state.timelineBoundary?.at !== context.current.state.timelineBoundary?.at) {
+      throw new Error('Timeline was rebased during compaction; discarded obsolete result.')
+    }
     if (context.sceneCompactionDue) {
       await this.persistCompaction(context.current, context.scene, decision, context.sceneEntries, now, new Set(context.visibleCompactionFacts.map(fact => fact.id)), context.reviewedPresence ?? [])
     }
@@ -5497,11 +5448,11 @@ export class InterludeService extends Service {
     try {
     const recentCutoff = new Date(now.getTime() - (config.overlayRecentDays ?? 2) * Time.day)
     const monthlyCutoff = new Date(now.getTime() - (config.overlayMonthlyAfterDays ?? 10) * Time.day)
-    const applied = await this.dbGet('interlude_state_patch', { storyId: story.id, status: 'applied' }, { sort: { appliedAt: 'asc' } }) as StatePatchProposal[]
+    const applied = await this.dbGetTimeline('interlude_state_patch', { storyId: story.id, status: 'applied' }, { sort: { appliedAt: 'asc' } }) as StatePatchProposal[]
     const weekly = applied.filter(patch => (patch.appliedAt ?? patch.createdAt) <= recentCutoff)
     let changed = false
     for (const group of groupOverlayPatches(weekly, config.overlayWeeklyWindowDays ?? 5)) {
-      const existing = (await this.dbGet('interlude_overlay_snapshot', {
+      const existing = (await this.dbGetTimeline('interlude_overlay_snapshot', {
         storyId: story.id, participantId: group.participantId, target: group.target, tier: 'weekly', periodStart: group.from,
       }))[0] as OverlaySnapshot | undefined
       if (existing) continue
@@ -5517,9 +5468,9 @@ export class InterludeService extends Service {
       changed = true
     }
 
-    const snapshots = await this.dbGet('interlude_overlay_snapshot', { storyId: story.id, tier: 'weekly', status: 'active' }, { sort: { periodEnd: 'asc' } }) as OverlaySnapshot[]
+    const snapshots = await this.dbGetTimeline('interlude_overlay_snapshot', { storyId: story.id, tier: 'weekly', status: 'active' }, { sort: { periodEnd: 'asc' } }) as OverlaySnapshot[]
     for (const group of groupOverlaySnapshots(snapshots.filter(snapshot => snapshot.periodEnd <= monthlyCutoff), config.overlayMonthlyWindowDays ?? 10)) {
-      const existing = (await this.dbGet('interlude_overlay_snapshot', {
+      const existing = (await this.dbGetTimeline('interlude_overlay_snapshot', {
         storyId: story.id, participantId: group.participantId, target: group.target, tier: 'monthly', periodStart: group.from,
       }))[0] as OverlaySnapshot | undefined
       if (existing) continue
@@ -5549,7 +5500,7 @@ export class InterludeService extends Service {
 
   private async overlaySnapshotsForPrompt(storyId: string, participantId?: string, background = false) {
     if (!this.memoryConfig.overlayCompressionEnabled) return [] as OverlaySnapshot[]
-    const rows = await this.dbGet('interlude_overlay_snapshot', { storyId, status: 'active' }, { sort: { periodEnd: 'desc' } }) as OverlaySnapshot[]
+    const rows = await this.dbGetTimeline('interlude_overlay_snapshot', { storyId, status: 'active' }, { sort: { periodEnd: 'desc' } }) as OverlaySnapshot[]
     const visible = rows.filter(snapshot => !snapshot.participantId || (background ? this.sharedStoryConfig.shareParticipantDetails : snapshot.participantId === participantId))
     // Current long-term state plus recent short-window deltas is sufficient; older
     // snapshots remain searchable/auditable without permanently taxing prompts.
@@ -5568,8 +5519,8 @@ export class InterludeService extends Service {
    * size; snapshots carry the older evolution separately. */
   private async rebuildLiveOverlayState(story: InterludeStory, now: Date) {
     const [applied, snapshots] = await Promise.all([
-      this.dbGet('interlude_state_patch', { storyId: story.id, status: 'applied' }) as Promise<StatePatchProposal[]>,
-      this.dbGet('interlude_overlay_snapshot', { storyId: story.id, status: 'active' }) as Promise<OverlaySnapshot[]>,
+      this.dbGetTimeline('interlude_state_patch', { storyId: story.id, status: 'applied' }) as Promise<StatePatchProposal[]>,
+      this.dbGetTimeline('interlude_overlay_snapshot', { storyId: story.id, status: 'active' }) as Promise<OverlaySnapshot[]>,
     ])
     const overlay = { ...(story.state.settingOverlay ?? {}) }
     const hasGlobalHistory = (target: StatePatchProposal['target']) => snapshots.some(snapshot => snapshot.target === target && !snapshot.participantId)
@@ -5668,7 +5619,7 @@ export class InterludeService extends Service {
     const content = clip(draft.content, this.memoryConfig.factContentCharacters)
     if (!content) return false
     const participantId = resolveParticipantId(draft.participantId, draft.sourceEntryIds, entries)
-    const existing = await this.dbGet('interlude_fact', { storyId, status: 'active' })
+    const existing = await this.dbGetTimeline('interlude_fact', { storyId, status: 'active' })
     // 当前先做完全规范化匹配的去重；更复杂的语义去重可在检索层升级时替换。
     const same = existing.find(fact => normalizeFact(fact.content) === normalizeFact(content) && (!fact.participantId || fact.participantId === participantId))
     const sourceEntryIds = (draft.sourceEntryIds ?? []).filter(id => entries.some(entry => entry.id === id)).slice(0, 20)
@@ -5724,7 +5675,7 @@ export class InterludeService extends Service {
   }
 
   private async backfillFactEmbeddings(storyId: string, batchSize: number) {
-    const facts = await this.dbGet('interlude_fact', { storyId, status: 'active' })
+    const facts = await this.dbGetTimeline('interlude_fact', { storyId, status: 'active' })
     const missing = facts
       .filter(fact => !fact.embedding?.length)
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
@@ -5745,7 +5696,7 @@ export class InterludeService extends Service {
     if (!path || !proposedValue || !sourceEntryIds.length) return
 
     // Merge repeated proposals for one setting path before evaluating them.
-    const candidates = await this.dbGet('interlude_state_patch', {
+    const candidates = await this.dbGetTimeline('interlude_state_patch', {
       storyId: story.id, participantId, target: draft.target, path,
     }) as StatePatchProposal[]
     const matching = candidates.filter(candidate => patchClaimsMatch(candidate.proposedValue, proposedValue))
@@ -5754,7 +5705,7 @@ export class InterludeService extends Service {
     const mergedSourceEntryIds = Array.from(new Set([
       ...(candidate?.sourceEntryIds ?? []), ...sourceEntryIds,
     ])).slice(0, 80)
-    const sourceRows = await this.dbGet('interlude_script_entry', {
+    const sourceRows = await this.dbGetTimeline('interlude_script_entry', {
       storyId: story.id, id: { $in: mergedSourceEntryIds },
     }) as ScriptEntry[]
     const evidence = statePatchEvidence(sourceRows, story.setting.timezone)
@@ -5891,7 +5842,7 @@ export class InterludeService extends Service {
       ? Array.from(new Set(value.filter(id => typeof id === 'number' && Number.isSafeInteger(id) && id > 0 && allowedIds.has(id)))).slice(0, 20)
       : []
     if (!ids.length) return false
-    const facts = await this.dbGet('interlude_fact', { storyId, id: { $in: ids }, status: 'active' }) as NarrativeFact[]
+    const facts = await this.dbGetTimeline('interlude_fact', { storyId, id: { $in: ids }, status: 'active' }) as NarrativeFact[]
     const unresolved = facts.filter(fact => fact.unresolved)
     if (!unresolved.length) return false
     await this.dbSet('interlude_fact', { id: { $in: unresolved.map(fact => fact.id) } }, { unresolved: false, lastSeenAt: now, updatedAt: now })
@@ -5974,6 +5925,19 @@ export class InterludeService extends Service {
         await new Promise(resolve => setTimeout(resolve, delay))
       }
     }
+  }
+
+  private async dbGetTimeline(table: string, query: any, options?: unknown): Promise<any[]> {
+    if (typeof query?.storyId !== 'string') throw new Error('Timeline queries require an explicit storyId.')
+    const rows = await this.dbGet('interlude_story', { id: query.storyId })
+    const boundary = normalizeTimelineBoundary(rows[0]?.state?.timelineBoundary)
+    return this.dbGet(table, timelineBoundaryQuery(table, query, boundary), options)
+  }
+
+  private async recentTimelineEntries(storyId: string, limit: number) {
+    return (await this.dbGetTimeline('interlude_script_entry', { storyId }, {
+      limit: Math.max(1, Math.min(limit, 200)), sort: { occurredAt: 'desc' },
+    })).reverse()
   }
 
   private dbGet(table: string, query: unknown, options?: unknown): Promise<any[]> {
@@ -6256,26 +6220,15 @@ function normalizeExpressionThreshold(value: unknown) {
 
 /**
  * A model's willingness is an intent estimate, not a transport permission.
- * Native faces need a visible-text counterpart so a model cannot turn every
- * routine reply into a face merely by returning willingness=1. The 0.90 cap
+ * Native faces require a nonempty reply; semantic suitability is reviewed
+ * independently from the structured proposal and its context. The 0.90 cap
  * deliberately makes thresholds above 0.90 an effective near-disable mode.
  */
-export function calibratedNativeFaceWillingness(semantic: NativeFaceSemantic, willingness: unknown, replyContent: unknown) {
-  const text = String(replyContent ?? '').replace(/<sep\/>/g, ' ').trim()
-  if (!text) return 0
-  const patterns: Record<NativeFaceSemantic, RegExp> = {
-    smile: /(?:微笑|开心|高兴|谢谢|好耶|好呀|可以|行吧|嘿|哈哈)/i,
-    laugh: /(?:哈{2,}|笑死|好笑|乐|绷不住|蚌埠|草|救命)/i,
-    sweat: /(?:流汗|尴尬|无语|服了|麻了|救命|离谱|完了|累|忙|不知道怎么说)/i,
-    awkward: /(?:尴尬|那个|呃|emm|……|\.{3,}|我真的|怎么说呢)/i,
-    heart: /(?:喜欢|爱你|抱抱|可爱|谢谢|好耶|开心|高兴)/i,
-    surprised: /(?:不会吧|真的假的|居然|什么|怎么会|\?{1,}|？{1,}|!{1,}|！{1,})/i,
-    sad: /(?:难过|哭|委屈|可怜|遗憾|心疼|唉)/i,
-    angry: /(?:生气|气死|烦|闭嘴|别[再乱闹说]|离谱|过分|你.*(?:啊|吧|？|!|！))/i,
-  }
-  const semanticMatch = patterns[semantic].test(text)
-  const evidence = semanticMatch ? 0.9 : 0.2
-  return Math.min(0.9, normalizeExpressionThreshold(willingness) * (0.25 + evidence * 0.75))
+export function calibratedNativeFaceWillingness(_semantic: NativeFaceSemantic, willingness: unknown, replyContent: unknown) {
+  if (!String(replyContent ?? '').trim() || typeof willingness !== 'number' || !Number.isFinite(willingness)) return 0
+  // Meaning is reviewed from context. The host enforces only probability and
+  // the existing near-disable cap, without language-specific emotion words.
+  return Math.max(0, Math.min(0.9, willingness))
 }
 
 function targetableMessageId(value: unknown) {
@@ -6431,13 +6384,9 @@ function coerceTimelinePosition(value: unknown) {
 /** Automatic script prose is a rendering, not the next turn's temporal source.
  * A compact host ledger retains the real sequence without letting a previous
  * paragraph be copied into a new time window. */
-export function timelineEntryPromptProjection(entry: ScriptEntry): ScriptEntry {
-  if (entry.kind !== 'script') return entry
-  const plan = normalizeTimelinePlan(entry.metadata?.timelinePlan)
-  if (!plan) return entry
-  const beats = plan.beats.map(beat => `${Math.round(beat.at * 100)}% ${beat.kind}: ${beat.summary}`).join(' | ')
-  const carry = plan.carry?.length ? ` Carry: ${plan.carry.join(' | ')}` : ''
-  return { ...entry, content: `[Host timeline ledger for this completed automatic window: ${beats}.${carry}]` }
+export function timelineEntryPromptProjection(entry: ScriptEntry, _preserveProse = true): ScriptEntry {
+  // Keep original prose intact; the separate timelinePlan metadata is a proposal.
+  return entry
 }
 
 export function normalizeGroupChatActions(
@@ -7135,6 +7084,7 @@ function normalizeStoryState(value: unknown): StoryState {
   const automation = isRecord(record.automation) ? record.automation : {}
   const continuity = isRecord(record.continuitySnapshot) ? normalizeContinuitySnapshot(record.continuitySnapshot) : undefined
   return {
+    timelineBoundary: normalizeTimelineBoundary(record.timelineBoundary),
     settingOverlay: {
       characterProfile: typeof overlay.characterProfile === 'string' ? overlay.characterProfile : undefined,
       perspective: typeof overlay.perspective === 'string' ? clip(overlay.perspective, 1_000) : undefined,
@@ -7302,24 +7252,12 @@ export function normalizeNarrativeComparison(value: string) {
     .slice(0, 12_000)
 }
 
-const NARRATIVE_PROGRESSION_MARKERS = [
-  '轮到', '下一位', '往前挪', '排到', '叫号', '取餐', '拿餐', '接过', '放下', '合上',
-  '收起', '打开', '关上', '起身', '坐下', '站起', '转身', '走到', '走出', '进入',
-  '下楼', '上楼', '出门', '进门', '回到', '回家', '离开', '抵达', '开始', '结束',
-  '完成', '换到', '换成', '停下',
-  '吃完', '吃饭', '午休', '下班', '上班',
-]
-
 function removeQuotedNarrativeText(value: string) {
   return value
     .replace(/“[^”]*”/gu, '')
     .replace(/「[^」]*」/gu, '')
     .replace(/"[^"]*"/gu, '')
     .replace(/'[^']*'/gu, '')
-}
-
-function narrativeCoreSimilarity(left: string, right: string) {
-  return narrativeTextSimilarity(removeQuotedNarrativeText(left), removeQuotedNarrativeText(right))
 }
 
 /** A host-owned safety stop for a duplicate recovery loop. It deliberately
@@ -7333,136 +7271,6 @@ function repetitionFallbackDecision(): NarrativeDecision {
   }
 }
 
-
-/** Automatic prose may render only the host-owned ledger. This catches common
- * lifecycle jumps such as a plan that stops at "started lunch" while prose
- * invents finishing lunch, leaving the cafeteria, or being back at the desk.
- * The check intentionally uses only clear start/finish markers so normal
- * descriptive wording does not become a false positive. */
-export function narrativeTimelinePlanConflict(script: string | undefined, plan: TimelinePlan | undefined, interaction?: NarrativeInteraction) {
-  const planned = plan?.beats.map(beat => beat.summary).join(' ') ?? ''
-  if (!planned.trim()) return undefined
-  const visibleReply = interaction?.reply?.mode === 'immediate' ? interaction.reply.content ?? '' : ''
-  const rendered = `${script ?? ''}\n${visibleReply}`.trim()
-  if (!rendered) return undefined
-  const lifecycles = [
-    {
-      name: '用餐',
-      starts: /(?:开始(?:吃|用餐)|(?:坐下|靠窗坐下).{0,12}(?:吃|用餐)|(?:要了|取了).{0,18}(?:饭|面|餐)|吃到一半|夹起.{0,12}(?:饭|面|菜)|喝了一口.{0,12}(?:汤|粥|饮料))/u,
-      completes: /(?:吃完(?:了)?|最后一口|餐盘.{0,12}(?:回收|端)|端到.{0,12}回收|离开食堂|走出食堂|回到办公室|回办公室)/u,
-    },
-    {
-      name: '会议',
-      starts: /(?:开始开会|进入会议|会议开始|讨论开始)/u,
-      completes: /(?:会议结束|会开完|散会|结束讨论)/u,
-    },
-    {
-      name: '通勤',
-      starts: /(?:开始通勤|准备出发|走向.{0,12}(?:车|地铁|电梯)|上了?(?:车|地铁|电梯))/u,
-      completes: /(?:到达(?:公司|办公室|家中|目的地)|抵达(?:公司|办公室|家中|目的地)|回到(?:办公室|家中)|到家)/u,
-    },
-  ]
-  for (const lifecycle of lifecycles) {
-    if (!lifecycle.starts.test(planned) || lifecycle.completes.test(planned)) continue
-    const match = rendered.match(lifecycle.completes)
-    if (match) return { lifecycle: lifecycle.name, planned: clip(planned, 120), observed: match[0] }
-  }
-  return undefined
-}
-
-/** Guard an explicit configured routine after its window has passed. Unlike the
- * timeline ledger guard, this does not say the planned block happened; it only
- * rejects prose that starts the same routine implausibly late without showing
- * an observed reason (a delayed meeting, emergency, traffic, and so on). */
-export function narrativeScheduleWindowConflict(script: string | undefined, schedule: SchedulePreplanRecord | undefined, now: Date, timezone: string, interaction?: NarrativeInteraction) {
-  if (!schedule || schedule.timezone !== timezone) return undefined
-  const content = `${script ?? ''}\n${interaction?.reply?.mode === 'immediate' ? interaction.reply.content ?? '' : ''}`.trim()
-  if (!content) return undefined
-  const local = storyLocalTimeContext(now, timezone)
-  const minutes = local.hour * 60 + Number(local.time.slice(3, 5))
-  const day = schedule.materializedDays.find(item => item.date === local.date)
-  if (!day) return undefined
-  const routines = [
-    { name: '早餐', label: /早餐/u, action: /(?:早餐|早饭|鸡蛋|面包|燕麦|咖啡).{0,24}(?:吃|喝)|(?:吃|喝).{0,24}(?:早餐|早饭|鸡蛋|面包|燕麦|咖啡)/u },
-    { name: '午饭', label: /午饭|午餐|中午缓冲/u, action: /(?:午饭|午餐|简餐|食堂|餐厅|餐盘|筷子|面前的饭菜|吃着|用餐)/u },
-    { name: '晚饭', label: /晚饭|晚餐/u, action: /(?:晚饭|晚餐|外卖|碗筷|厨房).{0,28}(?:吃|热|做)|(?:吃|热|做).{0,28}(?:晚饭|晚餐|外卖|碗筷|厨房)/u },
-  ]
-  const justifiedDelay = /(?:会议|项目|客户|电话|突发|紧急|堵车|外出).{0,20}(?:拖|延|耽误|占|卡|没结束|刚结束)|(?:因为|被).{0,32}(?:会议|项目|客户|电话|突发|紧急|堵车|外出)/u
-  if (justifiedDelay.test(content)) return undefined
-  for (const routine of routines) {
-    if (!routine.action.test(content)) continue
-    const block = day.blocks.find(item => routine.label.test(item.label))
-    if (!block) continue
-    const [hour, minute] = block.end.split(':').map(Number)
-    const endMinutes = hour * 60 + minute
-    const lateByMinutes = minutes - endMinutes
-    // Routine blocks are not appointments. A 30-minute allowance absorbs a
-    // normal meeting overrun while still catching the 14:20 lunch case.
-    if (lateByMinutes <= 30 || lateByMinutes >= 12 * 60) continue
-    return {
-      routine: routine.name,
-      scheduled: `${block.start}—${block.end} ${block.label}`,
-      observed: `${local.date} ${local.time.slice(0, 5)}`,
-      lateByMinutes,
-    }
-  }
-  return undefined
-}
-
-/** Automatic windows should show a bounded slice of life, not a montage that
- * leaves one scene, crosses several places and returns to the start. This is
- * deliberately a prose safety net: the timeline ledger remains the primary
- * source of allowed events, while this catches a narrator that embellishes it
- * into extra commutes, arrivals and return trips. */
-export function narrativeAutomaticSceneLoop(script: string | undefined, from: Date, now: Date) {
-  const content = script?.trim() ?? ''
-  if (!content) return undefined
-  const locations = narrativeLocationSequence(content)
-  const elapsedMinutes = Math.max(0, Math.round((now.getTime() - from.getTime()) / Time.minute))
-  const transitions = Math.max(0, locations.length - 1)
-  const returnedToStart = locations.length >= 4 && locations[0] === locations.at(-1)
-  const transitionLimit = elapsedMinutes <= 75 ? 2 : 3
-  if (!returnedToStart && transitions <= transitionLimit) return undefined
-  return { locations, transitions, elapsedMinutes, returnedToStart }
-}
-
-/** Extract only coarse physical settings in their narrative order. The terms
- * are intentionally conservative; an unclassified place simply cannot cause
- * a false scene-loop rejection. */
-export function narrativeLocationSequence(value: string) {
-  const patterns: Array<{ location: string; pattern: RegExp }> = [
-    { location: '办公室', pattern: /办公室|工位|会议室|行政楼|公司里|公司/u },
-    { location: '通勤', pattern: /地铁站|地铁|站台|车厢|公交(?:车|站)?|出租车|网约车|打车/u },
-    { location: '家中', pattern: /回到家|回家|到家|家里|卧室|浴室|卫生间|厨房|客厅/u },
-    { location: '外出地点', pattern: /街口|路上|商店|便利店|超市|餐馆|饭店|快餐店|咖啡馆|电影院/u },
-  ]
-  const mentions: Array<{ index: number; location: string }> = []
-  for (const { location, pattern } of patterns) {
-    for (const match of value.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))) {
-      if (typeof match.index === 'number') mentions.push({ index: match.index, location })
-    }
-  }
-  mentions.sort((left, right) => left.index - right.index)
-  const locations: string[] = []
-  for (const mention of mentions) {
-    if (locations.at(-1) !== mention.location) locations.push(mention.location)
-  }
-  return locations
-}
-
-/** Recovery has a stricter contract than an ordinary next turn. Once a draft
- * has already been identified as a duplicate, a few new words or one extra
- * action marker are not enough: the rewrite must leave the old scene body. */
-export function narrativeRecoveryStillSimilar(repetition: {
-  coreSimilarity: number
-  segmentOverlapRatio: number
-  segmentOverlapCount: number
-}) {
-  return repetition.coreSimilarity >= 0.72 && repetition.segmentOverlapCount >= 2
-    && repetition.segmentOverlapRatio >= 0.62
-    || repetition.coreSimilarity >= 0.6 && repetition.segmentOverlapRatio >= 0.7
-    && repetition.segmentOverlapCount >= 3
-}
 
 function narrativeSegments(value: string) {
   return value
@@ -7495,27 +7303,12 @@ export function narrativeSegmentOverlap(left: string, right: string) {
   return { ratio, matchedSegments, novelRatio: 1 - ratio }
 }
 
-/** A scene may stay in one room while still moving forward. Treat a candidate
- * as progression when it introduces a concrete state/action change rather
- * than merely repeating the same setting and waiting posture. */
-export function narrativeHasProgression(current: string, previous: string) {
-  const currentSegments = narrativeSegments(current)
-  const previousSegments = narrativeSegments(previous)
-  const currentBody = removeQuotedNarrativeText(current)
-  const previousBody = removeQuotedNarrativeText(previous)
-  const newMarkers = NARRATIVE_PROGRESSION_MARKERS.filter(marker => {
-    const currentHas = currentBody.includes(marker)
-    return currentHas && !previousBody.includes(marker)
-  }).length
-  const novelLength = currentSegments
-    .filter(segment => !previousSegments.some(previousSegment => narrativeTextSimilarity(segment, previousSegment) >= 0.68))
-    .reduce((total, segment) => total + segment.length, 0)
-  const totalLength = currentSegments.reduce((total, segment) => total + segment.length, 0)
-  const ending = currentSegments.slice(-2).join('')
-  const previousEnding = previousSegments.slice(-2).join('')
-  const endingChanged = !!ending && !!previousEnding && narrativeTextSimilarity(ending, previousEnding) < 0.62
-  return newMarkers > 0 && (novelLength >= 18 || totalLength > 0 && novelLength / totalLength >= 0.18)
-    || newMarkers >= 2 && endingChanged
+// Ranking aids retrieval only. No age, action-word or similarity threshold
+// decides whether an event is repeated or has progressed.
+export function rankNarrativeHistory(script: string, entries: ScriptEntry[]) {
+  return entries.filter(entry => entry.kind === 'script' && entry.content.trim())
+    .map(entry => ({ previousId: entry.id, similarity: narrativeTextSimilarity(script, entry.content) }))
+    .sort((a, b) => b.similarity - a.similarity || b.previousId - a.previousId)
 }
 
 /** A blended character n-gram Jaccard score works for Chinese and prose with

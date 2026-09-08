@@ -255,7 +255,7 @@ export declare class OpenAICompatibleNarrator implements NarrativeProvider {
     decide(request: NarrativeRequest): Promise<NarrativeDecision>;
     compact(request: CompactionRequest): Promise<CompactionDecision>;
     planTimeline(request: TimelinePlanRequest): Promise<TimelinePlan | undefined>;
-    reviewNarrative(request: NarrativeReviewRequest): Promise<import("./narrative-consistency").NarrativeReview>;
+    reviewNarrative(request: NarrativeReviewRequest): Promise<any>;
     planSchedulePreplan(request: SchedulePreplanReviewRequest): Promise<SchedulePreplanProposal | undefined>;
     compactOverlay(request: OverlayCompactionRequest): Promise<OverlayCompactionDecision>;
     analyzeAlter(request: AlterAnalysisRequest, alterConfig: AlterSystemConfig): Promise<AlterAnalysisDecision>;
@@ -332,6 +332,7 @@ export declare function storyStateForPrompt(state: NarrativeRequest['story']['st
         conversationFollowUpAt?: string[];
         conversationFollowUpParticipantId?: string;
     };
+    timelineBoundary?: import("./timeline-boundary").TimelineBoundary;
     settingOverlay: import("./types").StorySettingOverlay;
     activeSceneId?: number;
     activeArcId?: number;
@@ -501,14 +502,14 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
             entryId: number;
             participantId: string;
             windowEndedAt: string;
-            kind: import("./types").TimelineBeatKind;
+            kind: string;
             summary: string;
         };
         alreadyNarrated: {
             entryId: number;
             participantId: string;
             windowEndedAt: string;
-            kind: import("./types").TimelineBeatKind;
+            kind: string;
             summary: string;
         }[];
         deliveredMessages: {
@@ -543,6 +544,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
             conversationFollowUpAt?: string[];
             conversationFollowUpParticipantId?: string;
         };
+        timelineBoundary?: import("./timeline-boundary").TimelineBoundary;
         settingOverlay: import("./types").StorySettingOverlay;
         activeSceneId?: number;
         activeArcId?: number;
@@ -603,12 +605,29 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     } | {
         quotedMessages?: import("./types").IndexedQuotedMessageContext[];
         visualObservations?: string[];
-        userReportedTimes?: import("./types").UserReportedTime[];
         type: string;
         content: string;
         imageCount: number;
         observedAt: string;
         observedAtLocal: string;
+        temporalEvidence: {
+            statement: string;
+            receivedAt: string;
+            receivedAtLocal: {
+                timezone: string;
+                utc: string;
+                local: string;
+                date: string;
+                time: string;
+                hour: number;
+                weekday: string;
+                offset: string;
+                period: string;
+                periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+                daylightExpectation: string;
+            };
+            interpretation: "unresolved";
+        };
     };
     groupContext: {
         messages: {
@@ -690,12 +709,29 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
     } | {
         quotedMessages?: import("./types").IndexedQuotedMessageContext[];
         visualObservations?: string[];
-        userReportedTimes?: import("./types").UserReportedTime[];
         type: string;
         content: string;
         imageCount: number;
         observedAt: string;
         observedAtLocal: string;
+        temporalEvidence: {
+            statement: string;
+            receivedAt: string;
+            receivedAtLocal: {
+                timezone: string;
+                utc: string;
+                local: string;
+                date: string;
+                time: string;
+                hour: number;
+                weekday: string;
+                offset: string;
+                period: string;
+                periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+                daylightExpectation: string;
+            };
+            interpretation: "unresolved";
+        };
     };
     recentExchange: {
         tag: string;
@@ -714,14 +750,14 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
             entryId: number;
             participantId: string;
             windowEndedAt: string;
-            kind: import("./types").TimelineBeatKind;
+            kind: string;
             summary: string;
         };
         alreadyNarrated: {
             entryId: number;
             participantId: string;
             windowEndedAt: string;
-            kind: import("./types").TimelineBeatKind;
+            kind: string;
             summary: string;
         }[];
         deliveredMessages: {
@@ -788,6 +824,7 @@ export declare function toPromptPayload(request: NarrativeRequest, options?: {
             conversationFollowUpAt?: string[];
             conversationFollowUpParticipantId?: string;
         };
+        timelineBoundary?: import("./timeline-boundary").TimelineBoundary;
         settingOverlay: import("./types").StorySettingOverlay;
         activeSceneId?: number;
         activeArcId?: number;
@@ -979,14 +1016,14 @@ export declare function toTimelinePlanPayload(request: TimelinePlanRequest): {
             entryId: number;
             participantId: string;
             windowEndedAt: string;
-            kind: import("./types").TimelineBeatKind;
+            kind: string;
             summary: string;
         };
         alreadyNarrated: {
             entryId: number;
             participantId: string;
             windowEndedAt: string;
-            kind: import("./types").TimelineBeatKind;
+            kind: string;
             summary: string;
         }[];
         deliveredMessages: {
@@ -1002,6 +1039,21 @@ export declare function toTimelinePlanPayload(request: TimelinePlanRequest): {
         scope: "character" | "relationship" | "promise" | "world" | "event";
         content: string;
         unresolved: boolean;
+        sourceEntryIds: number[];
+        lastSeenAt: Date;
+        lastSeenAtLocal: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
     }[];
     recentEntries: {
         kind: string;
@@ -1010,4 +1062,189 @@ export declare function toTimelinePlanPayload(request: TimelinePlanRequest): {
         occurredAt: string;
     }[];
     recovery?: string;
+};
+export declare function toCompactionPayload(request: CompactionRequest): {
+    interval: {
+        from: string;
+        now: string;
+        fromLocal: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
+        nowLocal: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
+    };
+    setting: {
+        user: {
+            displayName: string;
+            profile: string;
+        };
+        relationship: string;
+        character: import("./types").CharacterSetting;
+        world: string;
+        perspective: string;
+        supportingCast: string;
+        location: string;
+        style: string;
+        timezone: string;
+    };
+    evolvingState: {
+        automation: {
+            quietUntil?: string;
+            nextAdvanceAt?: string;
+            lastAutoAdvanceAt?: string;
+            lastUserMessageAt?: string;
+            conversationFollowUpAt?: string[];
+            conversationFollowUpParticipantId?: string;
+        };
+        timelineBoundary?: import("./timeline-boundary").TimelineBoundary;
+        settingOverlay: import("./types").StorySettingOverlay;
+        activeSceneId?: number;
+        activeArcId?: number;
+        narrativeUpdateCount: number;
+        lastContinuityUpdateAt?: string;
+        scenePresence?: import("./types").ScenePresenceState[];
+        scheduleProfileFingerprint?: string;
+    };
+    existingWorkingDetails: import("./types").WorkingDetail[];
+    recentContinuity: {
+        lastNarratedBeat: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: string;
+            summary: string;
+        };
+        alreadyNarrated: {
+            entryId: number;
+            participantId: string;
+            windowEndedAt: string;
+            kind: string;
+            summary: string;
+        }[];
+        deliveredMessages: {
+            entryId: number;
+            participantId: string;
+            kind: string;
+            direction: string;
+            occurredAt: string;
+            content: string;
+        }[];
+    };
+    scene: import("./types").InterludeScene;
+    arc: import("./types").InterludeArc;
+    participants: {
+        unreadMessageCount: number;
+        pendingReplyCount: number;
+        updatedAt: string;
+        personId?: string;
+        openThreads?: string[];
+        relationshipNotes?: string[];
+        displayName?: string;
+        profile?: string;
+        relationship?: string;
+        relationshipOverlay?: string;
+        lastUserMessageAt?: string;
+        lastCharacterMessageAt?: string;
+        id: string;
+    }[];
+    existingFacts: {
+        id: number;
+        participantId: string;
+        scope: "character" | "relationship" | "promise" | "world" | "event";
+        content: string;
+        importance: number;
+        confidence: number;
+        unresolved: boolean;
+        sourceEntryIds: number[];
+        lastSeenAt: Date;
+        lastSeenAtLocal: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
+    }[];
+    entries: {
+        timelinePlan?: object;
+        id: number;
+        participantId: string;
+        kind: string;
+        actor: string;
+        content: string;
+        occurredAt: string;
+        occurredAtLocal: {
+            timezone: string;
+            utc: string;
+            local: string;
+            date: string;
+            time: string;
+            hour: number;
+            weekday: string;
+            offset: string;
+            period: string;
+            periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+            daylightExpectation: string;
+        };
+    }[];
+    schedulePreplanReview: {
+        localDate: string;
+        horizonDays: number;
+        current: {
+            revision: number;
+            timezone: string;
+            validFrom: string;
+            validThrough: string;
+            regimes: import("./types").SchedulePreplanRegime[];
+            exceptions: import("./types").SchedulePreplanException[];
+            reviewReason: string;
+        };
+        evidenceEntries: {
+            id: number;
+            kind: string;
+            actor: string;
+            content: string;
+            occurredAt: string;
+            occurredAtLocal: {
+                timezone: string;
+                utc: string;
+                local: string;
+                date: string;
+                time: string;
+                hour: number;
+                weekday: string;
+                offset: string;
+                period: string;
+                periodZh: "上午" | "下午" | "傍晚/晚上" | "夜间";
+                daylightExpectation: string;
+            };
+        }[];
+    };
 };

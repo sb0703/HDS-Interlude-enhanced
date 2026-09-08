@@ -69,7 +69,7 @@ test('fact retrieval reserves lanes for recently resolved events and open promis
   const service = {
     memoryConfig: { factLimit: 20, maxFactsPerStory: 200, factImportanceWeight: 0.5, factConfidenceWeight: 0.35, factRecencyWeight: 0.15, semanticWeight: 0.55, unresolvedWeight: 0.2 },
     config: { model: { embedding: { liveQuery: false } } },
-    dbGet: async (_table: string, query: any) => query.scope === 'event' && query.unresolved === false
+    dbGetTimeline: async (_table: string, query: any) => query.scope === 'event' && query.unresolved === false
       ? [resolved]
       : query.scope === 'promise' ? [promise] : crowded,
   }
@@ -83,7 +83,7 @@ test('an explicit resolved fact can close the old unresolved row', async () => {
   let patch: any
   const service = {
     memoryConfig: { factContentCharacters: 4_000, maxFactsPerStory: 200 },
-    dbGet: async () => [existing],
+    dbGetTimeline: async () => [existing],
     dbSet: async (_table: string, _query: any, value: any) => { patch = value },
     embedText: async () => [],
   }

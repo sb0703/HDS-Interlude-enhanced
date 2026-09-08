@@ -6,14 +6,14 @@ export declare function recentContinuityContext(entries: ScriptEntry[], now: Dat
         entryId: number;
         participantId: string;
         windowEndedAt: string;
-        kind: import("./types").TimelineBeatKind;
+        kind: string;
         summary: string;
     };
     alreadyNarrated: {
         entryId: number;
         participantId: string;
         windowEndedAt: string;
-        kind: import("./types").TimelineBeatKind;
+        kind: string;
         summary: string;
     }[];
     deliveredMessages: {

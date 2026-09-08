@@ -127,9 +127,9 @@ test('automatic script entries project to their host timeline ledger on later tu
     metadata: { timelinePlan: { beats: [{ at: 0, kind: 'activity', summary: '完成课堂练习' }, { at: 1, kind: 'state', summary: '仍在课堂' }] } },
   }
   const projected = timelineEntryPromptProjection(entry)
-  assert.notEqual(projected.content, entry.content)
-  assert.match(projected.content, /Host timeline ledger/)
-  assert.doesNotMatch(projected.content, /中午/)
+  assert.equal(projected.content, entry.content)
+  assert.deepEqual(projected.metadata.timelinePlan, entry.metadata.timelinePlan)
+  assert.match(projected.content, /中午/)
 })
 
 test('timeline director reuses the compaction route and requests a small JSON ledger', async () => {
