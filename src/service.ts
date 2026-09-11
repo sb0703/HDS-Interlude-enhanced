@@ -18,7 +18,7 @@ import {
 export { temporalEvidence, normalizeUserReportedTimes } from './temporal-evidence'
 import { HDS_INTERLUDE_VERSION } from './meta'
 import { mergeWorkingDetails } from './continuity'
-import { NarrativeReviewRequest, ReviewDelivery, normalizeNarrativeReview, reviewNeedsReplan, reviewRecoveryText } from './narrative-consistency'
+import { NarrativeReviewFailure, NarrativeReviewRequest, ReviewDelivery, narrativeReviewInvalidReason, normalizeNarrativeReview, reviewNeedsReplan, reviewRecoveryText } from './narrative-consistency'
 import { formatLayeredLog, phaseLabel, renderLogMessage } from './logging'
 import { calendarDayKey, formatLogTime, localClockMinutes } from './time'
 import { consumeGroupWillingness, evaluateGroupWillingness, GroupWillingnessConfig, GroupWillingnessState } from './group-willingness'
@@ -3061,9 +3061,15 @@ export class InterludeService extends Service {
         && entry.participantId === participant?.id && entry.occurredAt >= from && entry.occurredAt <= now)
         .map(entry => ({ target: entry.participantId, content: entry.content })))
     }
-    const request: NarrativeReviewRequest = { context, candidate: raw, allowedDeliveries, alreadyDelivered, retrievalHints, requireSemanticChecks: true, evidenceCharacterBudget: this.config.model.consistencyReviewHistoryCharacters }
-    const review = normalizeNarrativeReview(await this.compactor.reviewNarrative(request), request)
-    if (!review) throw new Error('Narrative consistency review unavailable or ungrounded; refusing to commit.')
+    let failure: NarrativeReviewFailure | undefined
+    const request: NarrativeReviewRequest = { context, candidate: raw, allowedDeliveries, alreadyDelivered, retrievalHints, requireSemanticChecks: true, evidenceCharacterBudget: this.config.model.consistencyReviewHistoryCharacters,
+      onFailure: detail => { failure = detail } }
+    const response = await this.compactor.reviewNarrative(request)
+    const review = normalizeNarrativeReview(response, request)
+    if (!review) {
+      const reason = failure ? `${failure.stage}/${failure.reason}` : response === undefined ? 'review/no-result' : `review/${narrativeReviewInvalidReason(response, request)}`
+      throw new Error(`Narrative consistency review unavailable (${reason}); refusing to commit.`)
+    }
     return review
   }
 

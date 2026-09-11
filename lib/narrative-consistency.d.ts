@@ -3,7 +3,13 @@ export interface ReviewDelivery {
     target: string;
     content: string;
 }
+export interface NarrativeReviewFailure {
+    stage: 'routing' | 'review' | 'review-repair' | 'reported-times' | 'reported-times-repair';
+    reason: string;
+}
 export interface NarrativeReviewRequest {
+    /** Host-only diagnostics; never serialized into model input. */
+    onFailure?: (failure: NarrativeReviewFailure) => void;
     context: NarrativeRequest;
     candidate: NarrativeDecision;
     allowedDeliveries: ReviewDelivery[];

@@ -7,6 +7,79 @@ import { OpenAICompatibleNarrator, toPromptPayload } from '../src/narrator'
 import { emptyStorySetting, emptyStoryState, ScriptEntry } from '../src/types'
 
 const now = new Date('2026-09-07T01:27:00Z'), from = new Date('2026-09-07T01:02:00Z')
+function queuedReviewer(responses: unknown[]) {
+  const calls: any[] = []
+  const model: any = { providers: [{ enabled: true, endpoint: 'https://example.invalid/chat', model: 'synthetic', useForCompaction: true }] }
+  const narrator = new OpenAICompatibleNarrator({ http: { post: async (_url: string, body: any) => {
+    calls.push(body)
+    assert.ok(responses.length, 'Unexpected additional model call')
+    const response = responses.shift()
+    if (response instanceof Error) throw response
+    return { choices: [{ message: { content: typeof response === 'string' ? response : JSON.stringify(response) } }] }
+  } } } as any, model, true)
+  return { narrator, calls }
+}
+
+test('review retries a transient HTTP failure once and keeps diagnostics host-only', async () => {
+  const r = request(), failures: unknown[] = []
+  r.onFailure = detail => failures.push(detail)
+  assert.equal('onFailure' in toNarrativeReviewPayload(r), false)
+  const { narrator, calls } = queuedReviewer([Object.assign(new Error('private response'), { response: { status: 429 } }), assessment()])
+  assert.equal((await narrator.reviewNarrative(r))?.verdict, 'pass')
+  assert.equal(calls.length, 2)
+  assert.deepEqual(failures, [])
+})
+
+test('review does not retry forbidden responses and returns only safe diagnostics', async () => {
+  const r = request(), failures: unknown[] = []
+  r.onFailure = detail => failures.push(detail)
+  const { narrator, calls } = queuedReviewer([Object.assign(new Error('private credentials'), { response: { status: 403 } })])
+  assert.equal(await narrator.reviewNarrative(r), undefined)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(failures, [{ stage: 'review', reason: 'http-403' }])
+})
+
+test('time extraction gets one structure repair without exposing candidate context', async () => {
+  const source = '下轮钟声之后。', r = request(source)
+  const malformed = { reportedTimes: [{ statement: source, relation: 'ambiguous', localTime: null }] }
+  const valid = { reportedTimes: [{ statement: source, relation: 'ambiguous' }] }
+  const { narrator, calls } = queuedReviewer([assessment('consistent', valid.reportedTimes), malformed, valid])
+  assert.deepEqual((await narrator.reviewNarrative(r))?.reportedTimes, valid.reportedTimes)
+  assert.equal(calls.length, 3)
+  assert.equal(JSON.parse(calls[2].messages[1].content).candidate, undefined)
+  assert.match(calls[2].messages.at(-1).content, /reported-times-invalid/)
+})
+
+test('repeated invalid extraction remains blocked with the exact failure stage', async () => {
+  const source = '下轮钟声之后。', r = request(source), failures: unknown[] = []
+  r.onFailure = detail => failures.push(detail)
+  const malformed = { reportedTimes: [{ statement: 'invented source', relation: 'ambiguous' }] }
+  const { narrator, calls } = queuedReviewer([assessment('consistent', [{ statement: source, relation: 'ambiguous' }]), malformed, malformed])
+  assert.equal(await narrator.reviewNarrative(r), undefined)
+  assert.equal(calls.length, 3)
+  assert.deepEqual(failures, [{ stage: 'reported-times-repair', reason: 'reported-times-invalid' }])
+})
+
+test('transport retry budget is shared across review and extraction', async () => {
+  const source = '下轮钟声之后。', r = request(source), failures: unknown[] = []
+  r.onFailure = detail => failures.push(detail)
+  const transient = Object.assign(new Error('private response'), { status: 503 })
+  const { narrator, calls } = queuedReviewer([transient, assessment('consistent', [{ statement: source, relation: 'ambiguous' }]), transient])
+  assert.equal(await narrator.reviewNarrative(r), undefined)
+  assert.equal(calls.length, 3)
+  assert.deepEqual(failures, [{ stage: 'reported-times', reason: 'http-503' }])
+})
+
+test('unrecoverable JSON and empty responses retain their repair diagnostics', async () => {
+  for (const [response, reason] of [['{broken', 'invalid-json'], ['', 'empty-response']]) {
+    const r = request(), failures: unknown[] = []
+    r.onFailure = detail => failures.push(detail)
+    const { narrator, calls } = queuedReviewer([response, response])
+    assert.equal(await narrator.reviewNarrative(r), undefined)
+    assert.equal(calls.length, 2)
+    assert.deepEqual(failures, [{ stage: 'review-repair', reason }])
+  }
+})
 const zone = 'Asia/Shanghai'
 function request(message = ''): NarrativeReviewRequest {
   return { requireSemanticChecks: true, context: {
