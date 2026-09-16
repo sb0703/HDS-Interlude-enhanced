@@ -250,6 +250,48 @@ test('host duration boundary rejects a broad and narrow false pass on a meeting 
   assert.equal((await planned.auditNarrativeTime!({ ...context, from: start, now: end }, future)).verdict, 'pass')
 })
 
+test('ambiguous duration blocks only when its completed reading exceeds the host interval', async () => {
+  const response = { verdict: 'pass', durationAssessments: [{ anchorId: 1, relation: 'ambiguous' }] }
+  const compactor = createCompactor({ http: { post: async () => ({ choices: [{ message: { content: JSON.stringify(response) } }] }) } } as any, model, true)
+  const end = new Date('2026-09-15T08:20:00Z')
+  const within = await compactor.auditNarrativeTime!({ ...context, from: new Date('2026-09-15T08:00:00Z'), now: end }, '她等了十分钟。')
+  assert.equal(within.verdict, 'pass')
+  const beyond = await compactor.auditNarrativeTime!({ ...context, from: new Date('2026-09-15T08:15:00Z'), now: end }, '她等了十分钟。')
+  assert.equal(beyond.verdict, 'uncertain')
+  assert.equal(beyond.reason, 'duration-relation-ambiguous')
+})
+
+test('narrative retry arms an exact due-intent wake instead of waiting for the background sweep', async () => {
+  const service: any = Object.create(InterludeService.prototype)
+  service.config = { runtime: { narrativeRetryDelaySeconds: 10, narrativeRetryMaxAttempts: 6 } }
+  service.dbGetTimeline = async () => []
+  service.dbSet = async () => undefined
+  service.reportStandalone = () => undefined
+  let intent: any
+  let wake: any
+  service.appendIntent = async (storyId: string, draft: any, _now: Date, participantId: string) => { intent = { storyId, participantId, ...draft } }
+  service.scheduleDueIntentWake = (storyId: string, notBefore: Date) => { wake = { storyId, notBefore } }
+  const at = new Date('2026-09-16T08:29:38.000Z')
+  assert.equal(await service.scheduleNarrativeRetry('story', 'participant', at), true)
+  assert.equal(intent.notBefore, '2026-09-16T08:29:48.000Z')
+  assert.equal(wake.storyId, 'story')
+  assert.equal(wake.notBefore.toISOString(), intent.notBefore)
+})
+
+test('service restart restores the earliest durable due-intent wake', async () => {
+  const service: any = Object.create(InterludeService.prototype)
+  const first = { id: 1, storyId: 'story', type: 'narrative-retry', status: 'pending', notBefore: new Date('2026-09-16T08:29:48.000Z'), payload: {} }
+  const later = { ...first, id: 2, notBefore: new Date('2026-09-16T08:30:48.000Z') }
+  service.getCanonicalStory = async () => ({ id: 'story' })
+  service.canHandleStory = () => true
+  service.dbGetTimeline = async () => [first, later]
+  let wake: any
+  service.scheduleDueIntentWake = (storyId: string, notBefore: Date) => { wake = { storyId, notBefore } }
+  await service.restoreDueIntentWake()
+  assert.equal(wake.storyId, 'story')
+  assert.equal(wake.notBefore.toISOString(), first.notBefore.toISOString())
+})
+
 test('a broad false pass cannot commit an out-of-window script', async () => {
   const future = { script: '他在午后十二点四十二已经走到晚上六点四十，到家后睡到夜里。' }
   const corrected = { script: '十二点四十二，他仍在处理眼前事务。' }

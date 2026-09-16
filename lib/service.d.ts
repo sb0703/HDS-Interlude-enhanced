@@ -947,6 +947,10 @@ export declare class InterludeService extends Service {
     /** Wake the scheduler close to a short typing delay instead of waiting for
      * the normal background sweep. The due intent remains the source of truth. */
     private scheduleDueIntentWake;
+    /** Timers are process-local while intents are durable. Re-arm the earliest
+     * pending task after a plugin reload or service restart so short retries and
+     * delayed deliveries do not fall back to the coarse background sweep. */
+    private restoreDueIntentWake;
     private scheduleNextSplitWake;
     /** Deliver already-decided <sep/> segments without invoking the narrator. */
     private deliverDueSplitSegments;

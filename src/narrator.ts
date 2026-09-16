@@ -803,7 +803,12 @@ export class OpenAICompatibleNarrator implements NarrativeProvider {
               throw new Error('Narrative time audit duration assessments missing or invalid.')
             for (const assessment of assessments) {
               const anchor = durationAnchors.find(item => item.id === assessment.anchorId)!
-              if (assessment.relation === 'ambiguous') return { verdict: 'uncertain', reason: 'duration-relation-ambiguous' }
+              // If the literal duration fits inside the host interval, time is
+              // safe regardless of whether the phrase describes a completed
+              // action, a plan or a memory. Keep ambiguity blocking only when
+              // the completed interpretation would exceed the real window.
+              if (assessment.relation === 'ambiguous' && anchor.minimumMinutes > elapsedMinutes + 0.25)
+                return { verdict: 'uncertain', reason: 'duration-relation-ambiguous' }
               if (assessment.relation === 'completed' && anchor.minimumMinutes > elapsedMinutes + 0.25)
                 return { verdict: 'reject', excerpt: anchor.quantity,
                   reason: `Host duration ${anchor.minimumMinutes} minutes exceeds the ${Math.round(elapsedMinutes * 10) / 10}-minute interval.` }

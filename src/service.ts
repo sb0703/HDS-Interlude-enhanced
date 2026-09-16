@@ -812,6 +812,7 @@ export class InterludeService extends Service {
     // Life advancement and memory compaction are both serialized per story.
     const sweepInterval = Math.max(1, this.config.runtime.sweepIntervalMinutes)
     this.ctx.setInterval(() => void this.sweep().catch(error => this.reportStandalone('warn', '后台推进失败 错误=%s', error)), sweepInterval * Time.minute)
+    void this.restoreDueIntentWake().catch(error => this.reportStandaloneOperation('diagnostic', 'debug', '恢复到期任务计时器失败 错误=%s', error))
     if (this.memoryConfig.enabled || this.schedulePreplanConfig.enabled) this.ctx.setInterval(() => void this.compactStories().catch(error => this.reportStandalone('warn', '后台整理失败 错误=%s', error)), Math.max(1, this.memoryConfig.backgroundIntervalMinutes) * Time.minute)
     if (this.blindModeConfig.enabled) {
       this.ctx.setInterval(() => this.reportBlindModeHealth(), this.blindModeConfig.healthReportMinutes * Time.minute)
@@ -5038,6 +5039,7 @@ export class InterludeService extends Service {
       notBefore: notBefore.toISOString(),
       payload: { narrativeRetry: true, userInitiated: true, attempt },
     }, now, participantId)
+    this.scheduleDueIntentWake(storyId, notBefore)
     this.reportStandalone('warn', '叙事模型请求失败，已安排自动重试 故事=%s 参与者=%s 次数=%d/%d 等待=%d秒', storyId, participantId, attempt, maxAttempts, delaySeconds)
     return true
   }
@@ -5099,6 +5101,19 @@ export class InterludeService extends Service {
     const timer = this.ctx.setTimeout(wake, delay)
     this.dueIntentWakeTimers.set(storyId, { cancel: timer, dueAt: notBefore.getTime() })
     this.reportStandaloneOperation('diagnostic', 'debug', '已设置到期计时器 故事=%s 触发时间=%s 等待=%dms', storyId, formatLogTime(notBefore, 'Asia/Shanghai'), delay)
+  }
+
+  /** Timers are process-local while intents are durable. Re-arm the earliest
+   * pending task after a plugin reload or service restart so short retries and
+   * delayed deliveries do not fall back to the coarse background sweep. */
+  private async restoreDueIntentWake() {
+    const story = await this.getCanonicalStory()
+    if (!story || !this.canHandleStory(story)) return
+    const pending = await this.dbGetTimeline('interlude_intent', { storyId: story.id, status: 'pending' }, {
+      sort: { notBefore: 'asc' }, limit: 100,
+    }) as NarrativeIntent[]
+    const next = pending.find(intent => !isActiveConsequence(intent))
+    if (next) this.scheduleDueIntentWake(story.id, next.notBefore)
   }
 
   private async scheduleNextSplitWake(storyId: string) {
