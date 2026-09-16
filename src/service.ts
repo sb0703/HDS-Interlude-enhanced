@@ -6688,10 +6688,39 @@ export class InterludeService extends Service {
       throw new Error('Memory evidence exceeds audit budget; retaining originals without partial verification.')
     }
     const ids = new Set(compactRequest.entries.filter(entry => entry.occurredAt <= compactRequest.now).map(entry => entry.id))
-    for (const draft of [...(decision.facts ?? []), ...(decision.statePatches ?? []), ...(decision.workingDetails ?? [])]) {
-      if (!draft.sourceEntryIds?.length || !draft.sourceEntryIds.every(id => ids.has(id))) {
-        throw new Error('Memory proposal has missing or unknown source entries; retaining originals.')
+    const grounded = (sourceEntryIds: number[] | undefined) => !!sourceEntryIds?.length && sourceEntryIds.every(id => ids.has(id))
+    // precedingEntries, existingFacts and developmentCandidates carry older ids
+    // for context. They are deliberately not writable evidence for this
+    // incremental checkpoint. A model may still copy one of those ids into an
+    // optional proposal; discard that proposal instead of losing the valid
+    // scene/arc summaries and retrying the whole batch on every new message.
+    const facts = (decision.facts ?? []).filter(draft => grounded(draft.sourceEntryIds))
+    const statePatches = (decision.statePatches ?? []).filter(draft => grounded(draft.sourceEntryIds)
+      && (!draft.interactionReview || [...draft.interactionReview.feedbackEntryIds, ...draft.interactionReview.responseEntryIds]
+        .every(id => ids.has(id) && draft.sourceEntryIds!.includes(id))))
+    const workingDetails = (decision.workingDetails ?? []).filter(draft => grounded(draft.sourceEntryIds))
+    const episodeTags = (decision.episodeTags ?? []).filter(draft => ids.has(draft.sourceEntryId))
+    const presence = (decision.scene?.presence ?? []).filter(draft => grounded(draft.sourceEntryIds))
+    const boundaryGrounded = !decision.scene?.boundary || grounded(decision.scene.boundary.sourceEntryIds)
+    const discarded = (decision.facts?.length ?? 0) - facts.length
+      + (decision.statePatches?.length ?? 0) - statePatches.length
+      + (decision.workingDetails?.length ?? 0) - workingDetails.length
+      + (decision.episodeTags?.length ?? 0) - episodeTags.length
+      + (decision.scene?.presence?.length ?? 0) - presence.length
+      + (boundaryGrounded ? 0 : 1)
+    decision.facts = facts
+    decision.statePatches = statePatches
+    decision.workingDetails = workingDetails
+    decision.episodeTags = episodeTags
+    if (decision.scene) {
+      decision.scene.presence = presence
+      if (!boundaryGrounded) {
+        decision.scene.close = false
+        decision.scene.boundary = undefined
       }
+    }
+    if (discarded) {
+      this.reportOperation('diagnostic', 'debug', context.current, 'advance', '记忆压缩已丢弃来源不属于本轮增量的候选 数量=%d', discarded)
     }
     if (usesRemoteProviders(this.config.model)) {
       if (!this.compactor.reviewNarrative) throw new Error('Memory consistency reviewer unavailable; retaining original entries.')

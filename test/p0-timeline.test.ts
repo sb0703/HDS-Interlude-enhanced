@@ -37,7 +37,7 @@ test('compaction omits full roleplay canon and mutable setting overlays', () => 
   assert.equal('recentContinuity' in payload, false)
 })
 
-test('memory audit blocks unsupported, uncertain and unavailable proposals before persistence', async () => {
+test('memory audit drops optional proposals with unavailable sources without losing the summaries', async () => {
   const service: any = Object.create(InterludeService.prototype)
   service.config = { model: { providers: [{ enabled: true, endpoint: 'https://example.invalid', model: 'test' }] } }
   const requests: any[] = []
@@ -46,7 +46,27 @@ test('memory audit blocks unsupported, uncertain and unavailable proposals befor
   await service.reviewCompactionMemory({ compactRequest: request }, proposal)
   assert.equal(requests[0].memoryAudit, true)
   assert.equal(requests[0].context.recentEntries[0].content, source.content)
-  await assert.rejects(service.reviewCompactionMemory({ compactRequest: request }, { facts: [{ ...proposal.facts[0], sourceEntryIds: [999] }] }), /source entries/)
+  const mixed: any = {
+    scene: { summary: '有效场景摘要', close: true, boundary: { reason: '旧上下文边界', sourceEntryIds: [999] }, presence: [
+      { name: '当前人物', status: 'present', basis: '当前条目', sourceEntryIds: [1] },
+      { name: '旧人物', status: 'off-scene', basis: '旧上下文', sourceEntryIds: [999] },
+    ] },
+    arc: { summary: '有效篇章摘要' },
+    facts: [{ ...proposal.facts[0], sourceEntryIds: [999] }, proposal.facts[0]],
+    statePatches: [{ target: 'world', path: 'development.established', proposedValue: '旧上下文', evidence: '旧', sourceEntryIds: [999] }],
+    workingDetails: [{ label: '旧事项', value: '旧值', sourceEntryIds: [999] }],
+    episodeTags: [{ sourceEntryId: 999, topics: ['旧'] }, { sourceEntryId: 1, topics: ['交接'] }],
+  }
+  await service.reviewCompactionMemory({ compactRequest: request, current: story }, mixed)
+  assert.equal(mixed.scene.summary, '有效场景摘要')
+  assert.equal(mixed.arc.summary, '有效篇章摘要')
+  assert.equal(mixed.scene.close, false)
+  assert.equal(mixed.scene.boundary, undefined)
+  assert.deepEqual(mixed.scene.presence.map((item: any) => item.name), ['当前人物'])
+  assert.equal(mixed.facts.length, 1)
+  assert.equal(mixed.statePatches.length, 0)
+  assert.equal(mixed.workingDetails.length, 0)
+  assert.deepEqual(mixed.episodeTags.map((item: any) => item.sourceEntryId), [1])
   for (const invalid of [undefined, { verdict: 'pass', issues: [] }, { verdict: 'pass', issues: [], checks: checks.map(check => ({ ...check, status: 'uncertain' })), reportedTimes: [] }]) {
     response = invalid
     await assert.rejects(service.reviewCompactionMemory({ compactRequest: request }, proposal), /retaining original/)
