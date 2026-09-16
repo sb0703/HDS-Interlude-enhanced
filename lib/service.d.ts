@@ -1172,7 +1172,9 @@ export declare function describeQuotedMessage(session: Session, characterName?: 
 export declare function normalizeQuotedMessageContent(value: unknown): string;
 export declare function normalizeAllowedReactions(value: unknown): ChatReactionName[];
 /** Parse only the narrow event ledger shape. Unknown model fields and empty
- * plans are discarded before they can become a source of world state. */
+ * plans are discarded before they can become a source of world state. The
+ * model owns causal order only; the host dynamically distributes that order
+ * across the real interval so provider arithmetic can never move the clock. */
 export declare function normalizeTimelinePlan(value: unknown): TimelinePlan | undefined;
 export declare function describeTimelinePlanRejection(value: unknown): string;
 export declare function timelineRetryDelayMilliseconds(failures: number): number;

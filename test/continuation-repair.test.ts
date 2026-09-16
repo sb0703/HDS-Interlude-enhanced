@@ -61,7 +61,10 @@ test('both payload orders retain clock evidence, open contact, source text and c
     const p = toPromptPayload(r, { cacheFirst })
     assert.equal(p.authoringWindow.continuation.lastScript.entryId, 1)
     assert.deepEqual(p.incomingEvent.event, { type: 'none' })
-    assert.deepEqual(p.availableNearFuture.timelinePlan, r.timelinePlan)
+    assert.deepEqual(p.availableNearFuture.timelinePlan, {
+      ...r.timelinePlan,
+      beats: [{ ...r.timelinePlan.beats[0], hostAtLocal: '2026-09-05 14:40:00' }],
+    })
     assert.deepEqual(p.availableNearFuture.timelineCarry, r.timelineCarry)
     assert.equal(p.ongoingThreads.activeConsequences[0].id, 7)
     assert.equal(p.availableNearFuture.upcomingPlans[0].id, 8)

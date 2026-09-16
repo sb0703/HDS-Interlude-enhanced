@@ -41,6 +41,21 @@ test('long intervals expose both endpoint clocks and continuity age', () => {
   assert.equal(payload.relevantEstablishedEpisodes.continuitySnapshotAgeMinutes, 1_020)
 })
 
+test('timeline beats carry host-computed local clocks into the main narrative', () => {
+  const from = new Date('2026-09-16T03:00:00.000Z')
+  const now = new Date('2026-09-16T03:20:00.000Z')
+  const request = requestAt(from, now)
+  request.timelinePlan = { beats: [
+    { at: 0, kind: 'activity', summary: '继续处理眼前事项' },
+    { at: 0.5, kind: 'thought', summary: '短暂停下来整理思路' },
+    { at: 1, kind: 'state', summary: '保持当前状态' },
+  ] }
+  const beats = toPromptPayload(request).availableNearFuture.timelinePlan.beats
+  assert.deepEqual(beats.map((beat: any) => beat.hostAtLocal), [
+    '2026-09-16 11:00:00', '2026-09-16 11:10:00', '2026-09-16 11:20:00',
+  ])
+})
+
 test('reload-style ISO timestamp rows are materialized as Date objects', () => {
   const normalized = normalizeDatabaseRow('interlude_story', {
     id: 'story', state: emptyStoryState(),

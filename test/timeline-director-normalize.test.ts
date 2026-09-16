@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { describeTimelinePlanRejection, normalizeTimelinePlan, timelinePlanWindowIssues } from '../src/service'
 
-test('normalizeTimelinePlan coerces string positions and near-miss kinds', () => {
+test('normalizeTimelinePlan assigns model order to host-owned positions', () => {
   const plan = normalizeTimelinePlan({
     beats: [
       { at: '0', kind: 'activity', summary: '继续随堂练习' },
@@ -19,7 +19,9 @@ test('normalizeTimelinePlan coerces string positions and near-miss kinds', () =>
 })
 
 test('normalizeTimelinePlan still rejects genuinely unusable beats', () => {
-  assert.equal(normalizeTimelinePlan({ beats: [{ at: 'abc', kind: 'activity', summary: 'x' }] }), undefined)
+  assert.deepEqual(normalizeTimelinePlan({ beats: [{ at: 'abc', kind: 'activity', summary: 'x' }] })?.beats, [
+    { at: 1, kind: 'activity', summary: 'x' },
+  ])
   assert.equal(normalizeTimelinePlan({ beats: [{ at: 0.5, kind: 3, summary: 'x' }] }), undefined)
   assert.equal(normalizeTimelinePlan({ beats: [{ at: 0.5, kind: 'activity' }] }), undefined)
   assert.equal(normalizeTimelinePlan({ beats: [] }), undefined)
@@ -37,7 +39,6 @@ test('describeTimelinePlanRejection explains each rejected beat', () => {
   })
   assert.match(reason, /节点校验详情/)
   assert.match(reason, /通过/)
-  assert.match(reason, /at="abc" 无法解析/)
   assert.match(reason, /kind=3 非法/)
   assert.match(reason, /summary 为空/)
   assert.equal(describeTimelinePlanRejection({}), '缺少 beats 数组')

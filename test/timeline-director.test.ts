@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { OpenAICompatibleNarrator, toTimelinePlanPayload } from '../src/narrator'
-import { InterludeService, normalizeTimelinePlan, timelineEntryPromptProjection, timelineRetryDelayMilliseconds } from '../src/service'
-import { desktopTimelineEntryView, normalizeTimelinePlan, timelineEntryPromptProjection } from '../src/service'
+import { desktopTimelineEntryView, InterludeService, normalizeTimelinePlan, timelineEntryPromptProjection, timelineRetryDelayMilliseconds } from '../src/service'
 import { emptyStorySetting, emptyStoryState, InterludeStory, ScriptEntry, TimelinePlanRequest } from '../src/types'
 
 const now = new Date('2026-08-31T08:37:00.000Z')
 
-test('timeline director accepts only bounded relative beats and discards malformed output', () => {
+test('timeline director keeps causal order while the host owns positions', () => {
   const plan = normalizeTimelinePlan({
     beats: [
       { at: 0.7, kind: 'thought', summary: '短暂想到中午的约定' },
@@ -17,14 +16,12 @@ test('timeline director accepts only bounded relative beats and discards malform
     ],
     carry: ['午间验收仍未发生'],
   })
-  // at=2 越界后被收敛到 1；at 不可解析的节点被丢弃（teleport 现在会归一为 activity，
-  // 因此该用例改用不可解析的 at 来验证真正的丢弃行为）。
-  assert.deepEqual(plan?.beats.map(beat => beat.at), [0, 0.7, 1])
+  assert.deepEqual(plan?.beats.map(beat => beat.at), [0, 0.5, 1])
   assert.equal(plan?.carry?.[0], '午间验收仍未发生')
   assert.equal(normalizeTimelinePlan({ beats: [] }), undefined)
 })
 
-test('timeline director tolerates documented aliases and position formats without accepting unknown kinds', () => {
+test('timeline director tolerates documented aliases and ignores provider position arithmetic', () => {
   const aliases = [
     ['action', 'activity'], ['event', 'activity'], ['scene', 'activity'], ['behavior', 'activity'],
     ['活动', 'activity'], ['行动', 'activity'], ['事件', 'activity'], ['场景', 'activity'],
@@ -44,7 +41,7 @@ test('timeline director tolerates documented aliases and position formats withou
     { at: 0.9, kind: 'event', summary: '超过四节点后裁剪' },
   ] })
   assert.deepEqual(plan?.beats.map(item => [item.at, item.kind]), [
-    [0, 'thought'], [0.5, 'activity'], [0.75, 'state'], [0.9, 'activity'],
+    [0, 'activity'], [1 / 3, 'state'], [2 / 3, 'thought'], [1, 'state'],
   ])
   assert.ok(!plan?.beats.some(item => item.summary === '未知类型'))
 })
@@ -185,6 +182,7 @@ test('timeline director reuses the compaction route and requests a small JSON le
   assert.match(systemPrompt, /never deterministic predictions/)
   assert.match(systemPrompt, /NOT yours to decide/)
   assert.match(systemPrompt, /Historical script prose can itself contain a mistaken future clock/)
+  assert.match(systemPrompt, /Do not output at, timestamps, dates, weekdays or daypart labels/)
   const payload = JSON.parse(calls[0].messages[1].content)
   // 载荷瘦身：剧本续写只保留末段结构信号，不再发送全文。
   assert.ok(payload.recentScriptContinuation.content.length <= 600)

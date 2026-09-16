@@ -7901,30 +7901,25 @@ function coerceTimelineKind(value: unknown): TimelinePlan['beats'][number]['kind
   return typeof value === 'string' ? TIMELINE_KIND_ALIASES[value.trim().toLowerCase()] ?? '' : ''
 }
 
-function coerceTimelinePosition(value: unknown) {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.min(1, value))
-  if (typeof value !== 'string') return Number.NaN
-  const text = value.trim()
-  const percent = text.endsWith('%')
-  const parsed = Number(percent ? text.slice(0, -1).trim() : text)
-  if (!Number.isFinite(parsed)) return Number.NaN
-  return Math.max(0, Math.min(1, percent || parsed > 1 ? parsed / 100 : parsed))
-}
 /** Parse only the narrow event ledger shape. Unknown model fields and empty
- * plans are discarded before they can become a source of world state. */
+ * plans are discarded before they can become a source of world state. The
+ * model owns causal order only; the host dynamically distributes that order
+ * across the real interval so provider arithmetic can never move the clock. */
 export function normalizeTimelinePlan(value: unknown): TimelinePlan | undefined {
   if (!isRecord(value) || !Array.isArray(value.beats)) return undefined
-  const beats = value.beats
+  const ordered = value.beats
     .filter(isRecord)
     .map(item => ({
-      at: coerceTimelinePosition(item.at),
       kind: coerceTimelineKind(item.kind),
       summary: typeof item.summary === 'string' ? clip(item.summary, 240).trim() : '',
     }))
-    .filter((item): item is TimelinePlan['beats'][number] => Number.isFinite(item.at) && !!item.kind && !!item.summary)
-    .sort((left, right) => left.at - right.at)
+    .filter((item): item is Omit<TimelinePlan['beats'][number], 'at'> => !!item.kind && !!item.summary)
     .slice(0, 4)
-  if (!beats.length) return undefined
+  if (!ordered.length) return undefined
+  const beats = ordered.map((item, index) => ({
+    ...item,
+    at: ordered.length === 1 ? 1 : index / (ordered.length - 1),
+  }))
   const carry = Array.isArray(value.carry)
     ? value.carry.filter(item => typeof item === 'string').map(item => clip(item, 180).trim()).filter(Boolean).slice(0, 4)
     : []
@@ -7937,8 +7932,6 @@ export function describeTimelinePlanRejection(value: unknown): string {
   if (!value.beats.length) return 'beats 为空数组（模型未产出任何节点）'
   const details = value.beats.filter(isRecord).map(item => {
     const problems: string[] = []
-    const at = coerceTimelinePosition(item.at)
-    if (!Number.isFinite(at)) problems.push(`at=${JSON.stringify(item.at)} 无法解析`)
     if (!coerceTimelineKind(item.kind)) problems.push(`kind=${JSON.stringify(item.kind)} 非法`)
     if (typeof item.summary !== 'string' || !item.summary.trim()) problems.push('summary 为空')
     return problems.join('，') || '通过'
