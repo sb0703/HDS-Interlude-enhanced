@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Config } from '../src/index'
 import { OpenAICompatibleNarrator, resolveModelRouting, createCompactor, toPromptPayload, toTimelinePlanPayload } from '../src/narrator'
-import { bindDueDelayedReplyExecution, groupDueIntents, InterludeService } from '../src/service'
+import { bindDueDelayedReplyExecution, groupDueIntents, InterludeService, shouldContinueNarrativeRetry } from '../src/service'
 import { authoredActionRecoveryDraft, resolveAuthoredActions, hasUnresolvedAuthoredActions } from '../src/script/authored-actions'
 import { NarrativeReviewRequest, isFreshNarrativeStart, narrativeReviewInvalidReason, narrativeReviewPrompt, narrativeReviewRepairPrompt, normalizeNarrativeReview, reviewNeedsReplan, toNarrativeReviewPayload } from '../src/narrative-consistency'
 import { narrativeDurationAnchors } from '../src/narrative-duration'
@@ -46,6 +46,20 @@ test('review checks recipient and allowed transport without extracting messages 
   assert.match(narrativeReviewPrompt(), /recipient and meaning/)
   assert.match(narrativeReviewPrompt(), /Never send, extract or invent a message/)
   assert.equal(normalizeNarrativeReview(reject('发过去：“会开完了。”', 'delivery', 'delivery', 'transport'), request)?.verdict, 'reject')
+})
+
+test('review contract treats allowed delivery as commit authorization and permits unsent drafts', () => {
+  const prompt = narrativeReviewPrompt()
+  assert.match(prompt, /候选一旦通过就会随本次提交执行/)
+  assert.match(prompt, /不能仅因 alreadyDelivered 为空而拒绝/)
+  assert.match(prompt, /尚未发送、没有按下发送、保留为草稿或放弃发送/)
+  assert.match(prompt, /allowedDeliveries 或 alreadyDelivered 其中一项/)
+})
+
+test('semantic rejection gets one durable retry while transient provider failures retain the full retry path', () => {
+  assert.equal(shouldContinueNarrativeRetry('consistency', 0), true)
+  assert.equal(shouldContinueNarrativeRetry('consistency', 1), false)
+  assert.equal(shouldContinueNarrativeRetry('provider', 6), true)
 })
 
 test('review interval makes Shanghai local time authoritative over the UTC transport clock', () => {
@@ -250,15 +264,19 @@ test('host duration boundary rejects a broad and narrow false pass on a meeting 
   assert.equal((await planned.auditNarrativeTime!({ ...context, from: start, now: end }, future)).verdict, 'pass')
 })
 
-test('ambiguous duration blocks only when its completed reading exceeds the host interval', async () => {
+test('an overall pass keeps ambiguous duration diagnostic while completed overrun stays blocked', async () => {
   const response = { verdict: 'pass', durationAssessments: [{ anchorId: 1, relation: 'ambiguous' }] }
   const compactor = createCompactor({ http: { post: async () => ({ choices: [{ message: { content: JSON.stringify(response) } }] }) } } as any, model, true)
   const end = new Date('2026-09-15T08:20:00Z')
   const within = await compactor.auditNarrativeTime!({ ...context, from: new Date('2026-09-15T08:00:00Z'), now: end }, '她等了十分钟。')
   assert.equal(within.verdict, 'pass')
   const beyond = await compactor.auditNarrativeTime!({ ...context, from: new Date('2026-09-15T08:15:00Z'), now: end }, '她等了十分钟。')
-  assert.equal(beyond.verdict, 'uncertain')
-  assert.equal(beyond.reason, 'duration-relation-ambiguous')
+  assert.equal(beyond.verdict, 'pass')
+
+  const completed = createCompactor({ http: { post: async () => ({ choices: [{ message: { content: JSON.stringify({ verdict: 'pass', durationAssessments: [{ anchorId: 1, relation: 'completed' }] }) } }] }) } } as any, model, true)
+  const rejected = await completed.auditNarrativeTime!({ ...context, from: new Date('2026-09-15T08:15:00Z'), now: end }, '她等了十分钟。')
+  assert.equal(rejected.verdict, 'reject')
+  assert.match(rejected.reason ?? '', /exceeds/)
 })
 
 test('narrative retry arms an exact due-intent wake instead of waiting for the background sweep', async () => {
@@ -306,6 +324,7 @@ test('a broad false pass cannot commit an out-of-window script', async () => {
   assert.equal(result.decision.script, corrected.script)
   assert.equal(calls, 2)
   assert.match(h.generations[1][21], /Host interval time audit reject/)
+  assert.match(h.generations[1][21], /ongoing action or wait may continue after nowLocal/)
 
   const failing = harness([future], [pass, pass])
   failing.service.compactor.auditNarrativeTime = async () => ({ verdict: 'reject', excerpt: '已经走到晚上六点四十' })

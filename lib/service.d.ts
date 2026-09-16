@@ -1206,6 +1206,8 @@ export declare function extractQuotedMessageContext(quote: unknown, selfId?: unk
 /** Extract the canonical appearance section instead of maintaining a second,
  * potentially drifting character-description setting. */
 export declare function characterAppearanceFromProfile(profile: string | undefined): string;
+type NarrativeFailureReason = 'repetition' | 'provider' | 'refused' | 'consistency';
+export declare function shouldContinueNarrativeRetry(reason: NarrativeFailureReason | undefined, completedAttempts: number): boolean;
 export declare function narrativeImageAttachable(enabled: boolean, interaction: NarrativeInteraction | undefined, crossActions?: readonly {
     mode?: string;
 }[]): boolean;

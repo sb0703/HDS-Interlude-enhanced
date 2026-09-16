@@ -3554,6 +3554,7 @@ export class InterludeService extends Service {
           const attempts = Math.max(...retries.map(intent => Number(intent.payload?.attempt) || 0))
           await this.dbSet('interlude_intent', { id: { $in: retries.map(intent => intent.id) } }, { status: 'cancelled', updatedAt: now })
           if (failureReason === 'refused') this.reportOperation('standard', 'warn', current, 'intent-due', '上游明确拒绝请求，已停止本次到期意图的自动重试')
+          else if (!shouldContinueNarrativeRetry(failureReason, attempts)) this.reportOperation('standard', 'warn', current, 'intent-due', '一致性审核重写及一次持久化重试仍未通过，已停止该回合继续重试')
           else if (streamRecovery) await this.scheduleStreamScriptRecovery(current.id, dueParticipant?.id ?? '', now, attempts)
           else await this.scheduleNarrativeRetry(current.id, dueParticipant?.id ?? '', now, attempts)
         }
@@ -3923,7 +3924,7 @@ export class InterludeService extends Service {
     return review
   }
 
-  private async tryDecide(story: InterludeStory, participant: InterludeParticipant | null, phase: NarrativeRequest['phase'], from: Date, now: Date, userMessage: string | undefined, dueIntents: NarrativeIntent[], supersededIntents: NarrativeIntent[] = [], groupContext?: GroupContext, images: NarrativeImage[] = [], audio: NarrativeAudio[] = [], chatCapabilities?: ChatActionCapabilities, quotedMessages: IndexedQuotedMessageContext[] = [], stickerCatalog: StickerCatalogEntry[] = [], turnQueryEmbedding?: number[], visualObservations?: string[], onEarlyReply?: (reply: EarlyNarrativeReply) => Promise<boolean>, options: { bypassTimelineBackoff?: boolean } = {}): Promise<{ decision: NarrativeDecision; succeeded: boolean; effectiveNow: Date; immediateObservations: WebObservation[]; timelinePlan?: TimelinePlan; failureReason?: 'repetition' | 'provider' | 'refused' }> {
+  private async tryDecide(story: InterludeStory, participant: InterludeParticipant | null, phase: NarrativeRequest['phase'], from: Date, now: Date, userMessage: string | undefined, dueIntents: NarrativeIntent[], supersededIntents: NarrativeIntent[] = [], groupContext?: GroupContext, images: NarrativeImage[] = [], audio: NarrativeAudio[] = [], chatCapabilities?: ChatActionCapabilities, quotedMessages: IndexedQuotedMessageContext[] = [], stickerCatalog: StickerCatalogEntry[] = [], turnQueryEmbedding?: number[], visualObservations?: string[], onEarlyReply?: (reply: EarlyNarrativeReply) => Promise<boolean>, options: { bypassTimelineBackoff?: boolean } = {}): Promise<{ decision: NarrativeDecision; succeeded: boolean; effectiveNow: Date; immediateObservations: WebObservation[]; timelinePlan?: TimelinePlan; failureReason?: NarrativeFailureReason }> {
     let immediateObservations: WebObservation[] = []
     let effectiveNow = now
     const automaticPhase = phase === 'advance' || phase === 'conversation-follow-up' || phase === 'intent-due'
@@ -4044,7 +4045,7 @@ export class InterludeService extends Service {
         }
         const recovery = [review?.verdict === 'reject' ? reviewRecoveryText(review) : '',
           timeAudit && timeAudit.verdict !== 'pass'
-            ? `Host interval time audit ${timeAudit.verdict}: ${timeAudit.reason || 'timing cannot be established'}. ${timeAudit.excerpt ? `Exact candidate excerpt: ${timeAudit.excerpt}.` : ''} Rewrite only the unpublished script so newly completed actions and its endpoint remain inside interval.fromLocal to interval.nowLocal; do not move the host clock.`
+            ? `Host interval time audit ${timeAudit.verdict}: ${timeAudit.reason || 'timing cannot be established'}. ${timeAudit.excerpt ? `Exact candidate excerpt: ${timeAudit.excerpt}.` : ''} Rewrite only the unpublished script so newly completed actions remain inside interval.fromLocal to interval.nowLocal; do not move the host clock. The endpoint describes the state at nowLocal, so an ongoing action or wait may continue after nowLocal and a remaining future duration must not be compressed into the elapsed interval.`
             : ''].filter(Boolean).join('\n')
         this.reportOperation('standard', 'warn', story, phase, '逻辑一致性未通过 次数=%d 原因=%s', attempt + 1, recovery)
         if (attempt >= 1 || earlyReplyCommitted) {
@@ -4084,6 +4085,7 @@ export class InterludeService extends Service {
       return {
         decision: {}, succeeded: false, effectiveNow, immediateObservations, timelinePlan,
         failureReason: error instanceof Error && error.message.startsWith('Narrative repetition guard') ? 'repetition' as const
+          : error instanceof Error && error.message.startsWith('Narrative consistency guard rejected') ? 'consistency' as const
           : isNonRetryableNarrativeRefusal(error) ? 'refused' as const : 'provider' as const,
       }
       }
@@ -8379,6 +8381,12 @@ export function characterAppearanceFromProfile(profile: string | undefined) {
   const marker = /(?:^|\n)\s*(?:[一二三四五六七八九十]+、\s*)?(?:外貌|外形|体貌|身体|身材)(?:与)?(?:身体)?特征[^\n]*/i
   const match = marker.exec(value)
   return clip(match ? value.slice(match.index) : value, 1_200).trim()
+}
+
+type NarrativeFailureReason = 'repetition' | 'provider' | 'refused' | 'consistency'
+
+export function shouldContinueNarrativeRetry(reason: NarrativeFailureReason | undefined, completedAttempts: number) {
+  return reason !== 'consistency' || completedAttempts < 1
 }
 
 export function narrativeImageAttachable(enabled: boolean, interaction: NarrativeInteraction | undefined, crossActions: readonly { mode?: string }[] = []) {
