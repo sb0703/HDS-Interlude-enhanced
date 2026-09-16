@@ -20,6 +20,23 @@ test('compaction receives source-local calendar anchors across midnight', () => 
   assert.equal(payload.entries[0].occurredAtLocal.local, '2026-09-06 23:30:00')
 })
 
+test('compaction omits full roleplay canon and mutable setting overlays', () => {
+  const sensitive: any = {
+    ...request,
+    story: {
+      ...story,
+      setting: { ...story.setting, character: { name: '周', profile: 'private full canon' }, world: 'private world', supportingCast: 'private cast' },
+      state: { ...story.state, settingOverlay: { characterProfile: 'private overlay', perspective: 'private perspective', characterTraits: ['evidence-backed trait'] } },
+    },
+  }
+  const payload = toCompactionPayload(sensitive)
+  assert.equal(payload.setting.character.name, '周')
+  assert.equal(payload.setting.character.profile, '')
+  assert.equal(payload.setting.world, '')
+  assert.equal('settingOverlay' in payload.evolvingState, false)
+  assert.equal('recentContinuity' in payload, false)
+})
+
 test('memory audit blocks unsupported, uncertain and unavailable proposals before persistence', async () => {
   const service: any = Object.create(InterludeService.prototype)
   service.config = { model: { providers: [{ enabled: true, endpoint: 'https://example.invalid', model: 'test' }] } }
@@ -62,11 +79,11 @@ test('elapsed plans stay separate from upcoming blocks and are never completion 
 
 test('scene anchor derives from persisted ending instead of proposed completion', async () => {
   const service: any = Object.create(InterludeService.prototype)
-  Object.defineProperty(service, 'memoryConfig', { value: { sceneSummaryCharacters: 1000 } })
+  Object.defineProperty(service, 'memoryConfig', { value: { sceneSummaryCharacters: 1000, sceneHookCharacters: 1000 } })
   service.activeScene = async () => ({ id: 1 })
   let patch: any
   service.dbSet = async (_table: string, _where: any, value: any) => { patch = value }
-  await service.persistTimelineSceneAnchor('synthetic', '尚未交接，准备稍后办理。', now)
-  assert.match(patch.summary, /尚未交接/)
-  assert.doesNotMatch(patch.summary, /latest completed state/)
+  await service.persistTimelineSceneAnchor('synthetic', { activity: { value: '准备交接', quote: '尚未交接，准备稍后办理。' } }, 42, now)
+  assert.match(patch.hook, /尚未交接/)
+  assert.equal(patch.summary, undefined, 'only the background editor may advance scene summaries')
 })

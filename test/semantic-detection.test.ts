@@ -101,7 +101,7 @@ test('any language or notation reaches generation and review without lexical fil
     const r = request(source)
     assert.equal(temporalEvidence(source, now, zone).statement, source)
     const generated = toPromptPayload(r.context) as any
-    assert.equal(generated.currentEvent.temporalEvidence.statement, source)
+    assert.equal(generated.incomingEvent.event.temporalEvidence.statement, source)
     const event = toNarrativeReviewPayload(r).evidence.find(item => item.ref === 'current-event')!.value as any
     assert.equal(event.temporalEvidence.statement, source)
     assert.equal(event.temporalEvidence.interpretation, 'unresolved')
@@ -139,10 +139,33 @@ test('live audit cannot pass without both grounded semantic checks', () => {
   const r = request()
   assert.equal(normalizeNarrativeReview({ verdict: 'pass', issues: [] }, r), undefined)
   assert.equal(normalizeNarrativeReview(assessment(), r)?.verdict, 'pass')
-  assert.equal(normalizeNarrativeReview(assessment('uncertain'), r)?.checks?.[0].status, 'uncertain')
+  assert.equal(normalizeNarrativeReview(assessment('uncertain'), r), undefined)
   const bad = assessment(); bad.checks[0].evidenceRefs = ['history:999']
   assert.equal(normalizeNarrativeReview(bad, r), undefined)
   assert.equal(normalizeNarrativeReview(assessment('conflict'), r), undefined)
+})
+
+test('timeline director exposes a forbidden upstream response instead of reporting invalid JSON', async () => {
+  const { narrator, calls } = queuedReviewer([new Error('Forbidden')])
+  await assert.rejects(narrator.planTimeline({ story: request().context.story, participant: null,
+    phase: 'advance', from, now, scene: null, facts: [], recentEntries: [], dueIntents: [] }),
+  /Timeline director upstream refusal \(http-403\)/)
+  assert.equal(calls.length, 1)
+})
+
+test('timeline director reports a bad-request response as upstream HTTP 400', async () => {
+  const { narrator, calls } = queuedReviewer([new Error('Bad Request')])
+  await assert.rejects(narrator.planTimeline({ story: request().context.story, participant: null,
+    phase: 'advance', from, now, scene: null, facts: [], recentEntries: [], dueIntents: [] }),
+  /Timeline director upstream refusal \(http-400\)/)
+  assert.equal(calls.length, 1)
+})
+
+test('malformed optional reported-time extraction does not invalidate grounded checks', () => {
+  const r = request('咱们有段时间没联系了吧')
+  const result: any = assessment()
+  result.reportedTimes = [{ statement: '有段时间', relation: 'past' }]
+  assert.deepEqual(normalizeNarrativeReview(result, r)?.reportedTimes, [])
 })
 
 test('contextual contradiction requires matching issue with an exact candidate quote', () => {

@@ -1,6 +1,6 @@
 # 分层彩色日志实现
 
-适用版本：`0.1.5-beta8-m6.custom.4`
+适用版本：`1.0.1-beta6-rebuild.custom.1`
 
 ## 目标
 

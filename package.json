@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-hds-interlude",
-  "version": "0.1.5-beta8-m6.custom.4",
+  "version": "1.0.1-beta6-rebuild.custom.1",
   "description": "A time-aware, persistent narrative chat framework for Koishi.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -16,6 +16,7 @@
     "DEPLOYMENT_GUIDE.md",
     "CONFIGURATION_GUIDE.md",
     "BEGINNER_GUIDE.md",
+    "新人上手一条龙配置服务v1.0.1-beta6-rebuild.custom.1.html",
     "command.md",
     "docs/README.md",
     "docs/ARCHITECTURE.md",

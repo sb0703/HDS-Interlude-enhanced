@@ -34,11 +34,11 @@ test('long intervals expose both endpoint clocks and continuity age', () => {
   const from = new Date('2026-08-22T15:00:00.000Z') // Shanghai 23:00
   const now = new Date('2026-08-23T08:00:00.000Z') // Shanghai 16:00
   const payload = toPromptPayload(requestAt(from, now))
-  assert.equal(payload.interval.fromLocal, '2026-08-22 23:00:00')
-  assert.equal(payload.interval.nowLocal, '2026-08-23 16:00:00')
-  assert.equal(payload.interval.nowLocalContext.period, 'afternoon')
-  assert.equal(payload.interval.elapsedSeconds, 61_200)
-  assert.equal(payload.continuitySnapshotAgeMinutes, 1_020)
+  assert.equal(payload.authoringWindow.interval.fromLocal, '2026-08-22 23:00:00')
+  assert.equal(payload.authoringWindow.interval.nowLocal, '2026-08-23 16:00:00')
+  assert.equal(payload.authoringWindow.interval.nowLocalContext.period, 'afternoon')
+  assert.equal(payload.authoringWindow.interval.elapsedSeconds, 61_200)
+  assert.equal(payload.relevantEstablishedEpisodes.continuitySnapshotAgeMinutes, 1_020)
 })
 
 test('reload-style ISO timestamp rows are materialized as Date objects', () => {
@@ -76,7 +76,7 @@ test('recentScript payload carries derived ownership without changing stored ent
     content: '她觉得这件事有点奇怪，但没有说出口。', occurredAt: now, metadata: {}, createdAt: now,
   }]
   const payload = toPromptPayload(request)
-  assert.equal(payload.recentScript[0].ownership, 'protagonist-narrative')
+  assert.equal(payload.relevantEstablishedEpisodes.recentScript[0].ownership, 'protagonist-narrative')
   assert.equal('ownership' in request.recentEntries[0], false)
 })
 
@@ -96,9 +96,9 @@ test('the current user message remains both a durable event and the explicit cur
     content: '现在发生的这一条消息', occurredAt: now, metadata: {}, createdAt: now,
   }]
   const payload = toPromptPayload(request)
-  assert.equal(payload.currentEvent.content, '现在发生的这一条消息')
-  assert.equal(payload.recentScript[0].content, '现在发生的这一条消息')
-  assert.equal(payload.recentScript[0].ownership, 'user-delivered-message')
+  assert.equal(payload.incomingEvent.event.content, '现在发生的这一条消息')
+  assert.equal(payload.relevantEstablishedEpisodes.recentScript[0].content, '现在发生的这一条消息')
+  assert.equal(payload.relevantEstablishedEpisodes.recentScript[0].ownership, 'user-delivered-message')
 })
 
 test('background Agency payload includes relationship identity but not raw chat history', () => {
@@ -112,8 +112,19 @@ test('background Agency payload includes relationship identity but not raw chat 
     state: emptyParticipantState(), status: 'active', createdAt: now, updatedAt: now,
   }]
   const payload = toPromptPayload(request)
-  assert.equal(payload.participants[0].displayName, '小桃')
-  assert.equal(payload.participants[0].relationship, '关系亲近')
-  assert.equal(payload.participants[0].profile, '主角信任的朋友')
-  assert.equal(payload.recentScript.length, 0)
+  assert.equal(payload.ongoingThreads.participants[0].displayName, '小桃')
+  assert.equal(payload.ongoingThreads.participants[0].relationship, '关系亲近')
+  assert.equal(payload.ongoingThreads.participants[0].profile, '主角信任的朋友')
+  assert.equal(payload.relevantEstablishedEpisodes.recentScript.length, 0)
+})
+
+
+
+test('live time evidence preserves user wording without a lexical clock verdict', () => {
+  const r = requestAt(new Date('2026-09-03T23:47:00Z'), new Date('2026-09-03T23:47:40Z'))
+  r.phase = 'user-message'
+  r.userMessage = '我八点出门；但还没离开。'
+  const payload: any = toPromptPayload(r)
+  assert.equal(payload.incomingEvent.event.temporalEvidence.statement, r.userMessage)
+  assert.equal(payload.incomingEvent.event.temporalEvidence.interpretation, 'unresolved')
 })
