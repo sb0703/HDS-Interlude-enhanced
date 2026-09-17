@@ -2,8 +2,15 @@ import { NarrativeDecision, NarrativeRequest, ScenePresenceDraft, TimelinePlan, 
 export interface ReviewDelivery {
     target: string;
     content: string;
+    bubbles?: string[];
+}
+export interface NarrativeReviewFailure {
+    stage: 'routing' | 'review' | 'review-repair' | 'reported-times' | 'reported-times-repair';
+    reason: string;
 }
 export interface NarrativeReviewRequest {
+    /** Host-only diagnostics; never serialized into model input. */
+    onFailure?: (failure: NarrativeReviewFailure) => void;
     context: NarrativeRequest;
     candidate: NarrativeDecision;
     allowedDeliveries: ReviewDelivery[];
@@ -13,6 +20,7 @@ export interface NarrativeReviewRequest {
         similarity: number;
     }>;
     requireSemanticChecks?: boolean;
+    requireDeliveryCheck?: boolean;
     memoryAudit?: boolean;
     memoryBaseline?: {
         scene: unknown;
@@ -29,14 +37,27 @@ export interface NarrativeReviewIssue {
     reason: string;
     repair: string;
 }
+export interface NarrativeTimeAudit {
+    verdict: 'pass' | 'reject' | 'uncertain';
+    /** Exact, contiguous candidate text if the audit found a completed event outside the interval. */
+    excerpt?: string;
+    reason?: string;
+    durationAssessments?: Array<{
+        anchorId: number;
+        relation: 'completed' | 'planned' | 'remembered' | 'ambiguous';
+    }>;
+}
 export interface NarrativeReview {
     verdict: 'pass' | 'reject';
     issues: NarrativeReviewIssue[];
     checks?: SemanticCheck[];
     reportedTimes?: UserReportedTime[];
 }
+/** A reset/rebase story has no active original yet; typical routines are not
+ * evidence of completed events earlier on its first local day. */
+export declare function isFreshNarrativeStart(context: NarrativeRequest): boolean;
 export interface SemanticCheck {
-    kind: 'time' | 'progression';
+    kind: 'time' | 'progression' | 'delivery';
     status: 'consistent' | 'uncertain' | 'conflict';
     evidenceRefs: string[];
     summary: string;
@@ -57,6 +78,7 @@ export declare function toNarrativeReviewPayload(request: NarrativeReviewRequest
     };
     memoryAudit: boolean;
     requireSemanticChecks: boolean;
+    requireDeliveryCheck: boolean;
     retrievalHints: {
         previousId: number;
         similarity: number;

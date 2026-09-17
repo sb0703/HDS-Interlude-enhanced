@@ -6,34 +6,38 @@
 
 HDS Interlude 是一个面向 Koishi 一对一与多参与者场景的持续叙事聊天框架。它让用户消息、角色的沉默、延迟回复、主动联系和自动推进，都成为同一段生活剧本中自然可见的部分，并由一次主叙事写作连贯地决定。
 
-当前版本：`0.1.5-beta8-m6.custom.4`。在持续生活剧本、结构化投递、Schedule Preplan、群聊意愿和多提供商模型连接之外，本版进一步补强动态时间与事件审核、记忆事实来源、跨日安排和时间线恢复边界。
+当前版本：`1.0.1-beta6-rebuild.custom.1`。在持续生活剧本、结构化投递、Schedule Preplan、群聊意愿和多提供商模型连接之外，本版进一步补强动态时间与事件审核、记忆事实来源、跨日安排和时间线恢复边界。
+
+本版适配上游 V2（`f9eda0c`）：引入 ScriptCommit 事件与投递回执、场景交接、原文记忆导航、版本化状态迁移及原生音频输入；保留本地多 bot 隔离、动态语义审核、独立图片生成和账号日志。旧时间线恢复边界在状态升级后继续生效，后台向量回填跨越重建时会丢弃旧结果。升级不要求清空故事数据；生产迁移仍需先用旧数据库副本验证。
 
 ## 项目来源与增强说明
 
-本项目基于官方 HDS Interlude 仓库 [MomoiCore/hds-interlude](https://gitee.com/MomoiCore/hds-interlude) 的内容和版本持续合并更新。官方仓库提供基础插件架构、持续叙事、时间轴、记忆、日程和模型连接等核心能力；本项目在此基础上保留官方功能，并补充了多账号、多实例故事隔离、人物形象一致性与参考图使用逻辑、严格角色设定约束、按机器人账号重置故事、运行日志隔离等增强内容。
+本项目基于官方 HDS Interlude 仓库 [MomoiCore/hds-interlude](https://gitee.com/MomoiCore/hds-interlude) 的内容和版本持续合并更新；增强版代码维护在 [sb0703/HDS-Interlude-enhanced](https://github.com/sb0703/HDS-Interlude-enhanced)。官方仓库提供基础插件架构、持续叙事、时间轴、记忆、日程和模型连接等核心能力；本项目在此基础上保留官方功能，并补充了多账号、多实例故事隔离、人物形象一致性与参考图使用逻辑、严格角色设定约束、按机器人账号重置故事、运行日志隔离等增强内容。
 
 当官方仓库发布新版本时，本项目会优先合并官方更新，再保留并适配上述增强功能。若官方实现与增强功能存在差异，应以当前代码和配置指南为准。
 
 ## 当前增强重点
 
 - **权威故事本地时间**：主叙事、时间导演和统一逻辑审核同时接收 UTC 与故事时区字段；日期、星期、早晚和跨午夜判断以本地时间为准。
-- **受控自动推进**：时间导演支持宽容计划解析、持久化退避和六次失败后的保守熔断；手动推进可以绕过冷却进行一次主动探测。
+- **受控自动推进**：时间导演只决定节点的因果顺序，宿主依据真实窗口动态分配节点位置并把精确本地时刻交给主叙事；同时支持持久化退避和六次失败后的保守熔断，手动推进可以绕过冷却进行一次主动探测。
 - **统一逻辑审核**：候选剧本在落库和投递前检查时间、人物、事件与消息依据；审核格式异常可受限修复一次，仍无依据时拒绝提交。
 - **可见回复恢复**：模型遗漏私聊或群聊传输结构时，只补齐缺失字段，不重新创作整段剧本，也不把旁白提取成消息发送。
-- **可靠记忆整理**：场景压缩按内容指纹冷却并复核检查点，避免同一失败任务反复调用模型；Schedule Preplan 的结果与压缩失败解耦保存。
+- **可靠记忆整理**：场景压缩按内容指纹冷却并复核检查点；旧条目、既有事实和发展候选只作为摘要上下文，新增记忆只能引用本轮增量条目。模型误引旧来源时逐项丢弃无效候选并保留有效场景与篇章摘要，避免整批失败和连续重试；Schedule Preplan 的结果与压缩失败解耦保存。
 - **自然聊天节奏**：`<sep/>` 常见变体会在模型可见回复中统一规范；ChatRhythm 只记录成功投递回复的结构签名，动态提示节奏变化，不保存正文、不写死角色或场景，也不增加模型调用。
 - **动态时间与事件判断**：依据完整原话、故事时区和历史解释时间、期限与剧情推进，不再以固定动作词或相似度阈值否决剧情。提取出用户报告时间后，会单独复核原话，避免把接收时间误当发生时间；这一分支会增加一次模型调用。
 - **实际正文优先**：历史计划保留为计划，连续性和场景锚点使用实际正文；记忆写入前检查来源与完成状态，格式纠错使用本轮可用证据编号及候选原文。
 - **跨日安排与恢复隔离**：日程覆盖跨夜安排，并区分本轮已结束的计划与未来安排。显式重建时间线后，旧记录继续保留供查阅，但不会重新进入运行时上下文，重建前启动的后台结果也不能写回。
 - **上下文表情审核**：原生表情结合回复意图、否定与反讽判断，主机保留允许列表和意愿阈值，不再依赖中文情绪关键词。
+- **侧端失败保护**：Alter 只接受非空 `description`，结构缺失时进行一次无输出上限恢复，并对鉴权或请求拒绝及时停止重复调用；时间导演会在候选计划越过宿主时间窗口时拒绝落库，能被真实宿主区间完整容纳的模糊时长不会误阻断。主叙事失败后的持久化重试会按配置秒数主动唤醒，不再被动等待后台扫描；上游返回 400/403 或内容审核拒绝时保留游标并进入冷却。
 
 升级代码不会自动清空或修复已有剧情数据。管理员命令 `interlude.timeline.rebase` 会重建运行时边界并清空派生状态、关系笔记与旧日程，原始历史仍保留；执行前请确认需要重新开始当前时间线。关闭 `consistencyReview` 会跳过主叙事的独立语义审核，远程记忆整理仍执行自己的写入审核。模型审核可能误判，不能替代对历史数据来源的核对。
 
-本轮验证包含 240 项本地测试、TypeScript 类型检查，以及两条配置路线各 9 项纯虚构模型案例。模型服务不可用或审核结构仍无效时，保留未提交状态等待重试；验证结果不代表所有自然语言场景都能正确判断。技术说明见[审核与恢复边界](docs/development/2026-09-08-review-boundary-cleanup.md)。
+本轮验证包含 448 项本地测试、TypeScript 类型检查，以及两条配置路线各 9 项纯虚构模型案例。模型服务不可用或审核结构仍无效时，保留未提交状态等待重试；验证结果不代表所有自然语言场景都能正确判断。技术说明见[审核与恢复边界](docs/development/2026-09-08-review-boundary-cleanup.md)。
 
 ## 文档导航
 
 - 第一次安装和测试：[BEGINNER_GUIDE.md](BEGINNER_GUIDE.md)
+- 浏览器一条龙配置向导：[新人上手一条龙配置服务v1.0.1-beta6-rebuild.custom.1.html](新人上手一条龙配置服务v1.0.1-beta6-rebuild.custom.1.html)
 - 从零部署 QQ 角色：[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
 - 逐项配置说明：[CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)
 - 管理员命令：[command.md](command.md)
@@ -335,19 +339,19 @@ npm install koishi-plugin-hds-interlude@beta
 发布用 `.tgz` 不提交到 Git。完成本地构建并执行 `npm pack` 后，可在 Koishi 实例目录安装生成的预发布包：
 
 ```bash
-npm install /absolute/path/to/koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz
+npm install /absolute/path/to/koishi-plugin-hds-interlude-1.0.1-beta6-rebuild.custom.1.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-npm install C:\dev\HDS-Interlude\plugins\hds-interlude\release\koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz
+npm install C:\dev\HDS-Interlude\plugins\hds-interlude\release\koishi-plugin-hds-interlude-1.0.1-beta6-rebuild.custom.1.tgz
 ```
 
 Koishi Desktop 的实例使用 Yarn 4。请在实例目录执行以下命令，并在完成后重载插件或重启 Desktop：
 
 ```powershell
-corepack yarn add "koishi-plugin-hds-interlude@file:C:/dev/HDS-Interlude/plugins/hds-interlude/release/koishi-plugin-hds-interlude-0.1.5-beta8-m6.custom.4.tgz" --exact
+corepack yarn add "koishi-plugin-hds-interlude@file:C:/dev/HDS-Interlude/plugins/hds-interlude/release/koishi-plugin-hds-interlude-1.0.1-beta6-rebuild.custom.1.tgz" --exact
 ```
 
 安装后重新加载 Koishi，再在 Console 启用插件。

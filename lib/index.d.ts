@@ -15,7 +15,7 @@ declare module '@koishijs/console' {
     }
 }
 export declare const name = "hds-interlude";
-export declare const version = "0.1.5-beta8-m6.custom.4";
+export declare const version = "1.0.1-beta6-rebuild.custom.1";
 export declare const reusable = true;
 export declare const inject: {
     required: string[];
@@ -34,6 +34,7 @@ export declare function resolveBotScopedTarget<T>(targets: ReadonlyMap<string, T
 export declare function sharedCommandContext(ctx: Context): Context;
 export declare const Config: Schema<InterludeConfig>;
 export declare function apply(ctx: Context, config: InterludeConfig): void;
+export declare function looksLikeInterludeCommand(content: string): boolean;
 export * from './narrator';
 export * from './service';
 export * from './types';

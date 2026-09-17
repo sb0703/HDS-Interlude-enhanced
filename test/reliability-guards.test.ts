@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { InterludeService } from '../src/service'
+import { InterludeService, isNonRetryableNarrativeRefusal } from '../src/service'
 import {
   emptyStorySetting, emptyStoryState, InterludeScene, InterludeStory, ScriptEntry,
 } from '../src/types'
@@ -18,6 +18,14 @@ const scene: InterludeScene = {
 const entry = (id: number, content = `条目${id}`): ScriptEntry => ({
   id, storyId: story.id, participantId: '', kind: 'script', actor: 'narrator', content,
   metadata: {}, occurredAt: now, createdAt: now,
+})
+
+test('definite upstream refusals stop narrative retries while transient failures remain retryable', () => {
+  assert.equal(isNonRetryableNarrativeRefusal(new Error('Narrative consistency review unavailable (review/http-403); refusing to commit.')), true)
+  assert.equal(isNonRetryableNarrativeRefusal(new Error('Timeline director upstream refusal (http-403).')), true)
+  assert.equal(isNonRetryableNarrativeRefusal(new Error('All narrative providers failed. relay (attempt 1): Forbidden')), true)
+  assert.equal(isNonRetryableNarrativeRefusal(new Error('Narrative provider returned an empty response.')), false)
+  assert.equal(isNonRetryableNarrativeRefusal(new Error('Narrative consistency guard rejected the candidate; no script commit.')), false)
 })
 
 function compactionHarness(entries: ScriptEntry[]) {
@@ -81,4 +89,12 @@ test('manual compaction persists completed schedule review even when scene compr
   service.reportOperation = () => undefined
   assert.equal(await service.compactUnlocked(story, now, true), false)
   assert.equal(persisted, 1)
+})
+
+test('content-policy compaction cooldown applies across changing entry fingerprints', () => {
+  const service = Object.create(InterludeService.prototype) as any
+  service.compactionBackoff = new Map()
+  service.reportStandaloneOperation = () => undefined
+  service.noteCompactionFailure('story', 'first', new Error('Compaction request blocked by provider content policy (PROHIBITED_CONTENT).'))
+  assert.equal(service.compactionIsBackedOff('story', 'later'), true)
 })

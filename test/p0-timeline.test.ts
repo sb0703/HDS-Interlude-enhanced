@@ -20,7 +20,24 @@ test('compaction receives source-local calendar anchors across midnight', () => 
   assert.equal(payload.entries[0].occurredAtLocal.local, '2026-09-06 23:30:00')
 })
 
-test('memory audit blocks unsupported, uncertain and unavailable proposals before persistence', async () => {
+test('compaction omits full roleplay canon and mutable setting overlays', () => {
+  const sensitive: any = {
+    ...request,
+    story: {
+      ...story,
+      setting: { ...story.setting, character: { name: '周', profile: 'private full canon' }, world: 'private world', supportingCast: 'private cast' },
+      state: { ...story.state, settingOverlay: { characterProfile: 'private overlay', perspective: 'private perspective', characterTraits: ['evidence-backed trait'] } },
+    },
+  }
+  const payload = toCompactionPayload(sensitive)
+  assert.equal(payload.setting.character.name, '周')
+  assert.equal(payload.setting.character.profile, '')
+  assert.equal(payload.setting.world, '')
+  assert.equal('settingOverlay' in payload.evolvingState, false)
+  assert.equal('recentContinuity' in payload, false)
+})
+
+test('memory audit drops optional proposals with unavailable sources without losing the summaries', async () => {
   const service: any = Object.create(InterludeService.prototype)
   service.config = { model: { providers: [{ enabled: true, endpoint: 'https://example.invalid', model: 'test' }] } }
   const requests: any[] = []
@@ -29,7 +46,27 @@ test('memory audit blocks unsupported, uncertain and unavailable proposals befor
   await service.reviewCompactionMemory({ compactRequest: request }, proposal)
   assert.equal(requests[0].memoryAudit, true)
   assert.equal(requests[0].context.recentEntries[0].content, source.content)
-  await assert.rejects(service.reviewCompactionMemory({ compactRequest: request }, { facts: [{ ...proposal.facts[0], sourceEntryIds: [999] }] }), /source entries/)
+  const mixed: any = {
+    scene: { summary: '有效场景摘要', close: true, boundary: { reason: '旧上下文边界', sourceEntryIds: [999] }, presence: [
+      { name: '当前人物', status: 'present', basis: '当前条目', sourceEntryIds: [1] },
+      { name: '旧人物', status: 'off-scene', basis: '旧上下文', sourceEntryIds: [999] },
+    ] },
+    arc: { summary: '有效篇章摘要' },
+    facts: [{ ...proposal.facts[0], sourceEntryIds: [999] }, proposal.facts[0]],
+    statePatches: [{ target: 'world', path: 'development.established', proposedValue: '旧上下文', evidence: '旧', sourceEntryIds: [999] }],
+    workingDetails: [{ label: '旧事项', value: '旧值', sourceEntryIds: [999] }],
+    episodeTags: [{ sourceEntryId: 999, topics: ['旧'] }, { sourceEntryId: 1, topics: ['交接'] }],
+  }
+  await service.reviewCompactionMemory({ compactRequest: request, current: story }, mixed)
+  assert.equal(mixed.scene.summary, '有效场景摘要')
+  assert.equal(mixed.arc.summary, '有效篇章摘要')
+  assert.equal(mixed.scene.close, false)
+  assert.equal(mixed.scene.boundary, undefined)
+  assert.deepEqual(mixed.scene.presence.map((item: any) => item.name), ['当前人物'])
+  assert.equal(mixed.facts.length, 1)
+  assert.equal(mixed.statePatches.length, 0)
+  assert.equal(mixed.workingDetails.length, 0)
+  assert.deepEqual(mixed.episodeTags.map((item: any) => item.sourceEntryId), [1])
   for (const invalid of [undefined, { verdict: 'pass', issues: [] }, { verdict: 'pass', issues: [], checks: checks.map(check => ({ ...check, status: 'uncertain' })), reportedTimes: [] }]) {
     response = invalid
     await assert.rejects(service.reviewCompactionMemory({ compactRequest: request }, proposal), /retaining original/)
@@ -62,11 +99,11 @@ test('elapsed plans stay separate from upcoming blocks and are never completion 
 
 test('scene anchor derives from persisted ending instead of proposed completion', async () => {
   const service: any = Object.create(InterludeService.prototype)
-  Object.defineProperty(service, 'memoryConfig', { value: { sceneSummaryCharacters: 1000 } })
+  Object.defineProperty(service, 'memoryConfig', { value: { sceneSummaryCharacters: 1000, sceneHookCharacters: 1000 } })
   service.activeScene = async () => ({ id: 1 })
   let patch: any
   service.dbSet = async (_table: string, _where: any, value: any) => { patch = value }
-  await service.persistTimelineSceneAnchor('synthetic', '尚未交接，准备稍后办理。', now)
-  assert.match(patch.summary, /尚未交接/)
-  assert.doesNotMatch(patch.summary, /latest completed state/)
+  await service.persistTimelineSceneAnchor('synthetic', { activity: { value: '准备交接', quote: '尚未交接，准备稍后办理。' } }, 42, now)
+  assert.match(patch.hook, /尚未交接/)
+  assert.equal(patch.summary, undefined, 'only the background editor may advance scene summaries')
 })

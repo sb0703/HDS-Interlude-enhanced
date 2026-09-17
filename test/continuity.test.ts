@@ -50,8 +50,8 @@ test('cache-first keeps the same timeline and continuity constraints as legacy',
     timelinePlan: { beats: [{ at: 1, kind: 'activity', summary: '发出已经准备好的回复' }] }, timelineCarry: ['会议还没开始'] }
   const legacy = toPromptPayload(request) as any
   const cache = toPromptPayload(request, { cacheFirst: true }) as any
-  for (const key of ['timelinePlan', 'timelineCarry', 'recentContinuity']) assert.deepEqual(cache[key], legacy[key])
-  assert.equal(cache.timelinePlan.beats[0].summary, '发出已经准备好的回复')
+  for (const key of ['timelinePlan', 'timelineCarry', 'recentContinuity']) assert.deepEqual((key === 'recentContinuity' ? cache.relevantEstablishedEpisodes : cache.availableNearFuture)[key], (key === 'recentContinuity' ? legacy.relevantEstablishedEpisodes : legacy.availableNearFuture)[key])
+  assert.equal(cache.availableNearFuture.timelinePlan.beats[0].summary, '发出已经准备好的回复')
 })
 
 test('visible-reply recovery returns the unpublished draft to the model as data', () => {
@@ -62,15 +62,15 @@ test('visible-reply recovery returns the unpublished draft to the model as data'
     outputRecovery: true, outputRecoveryDraft: draft,
   }
   const payload = toPromptPayload(request) as any
-  assert.equal(payload.outputRecovery, true)
-  assert.deepEqual(payload.outputRecoveryDraft, draft)
+  assert.equal(payload.authoringWindow.outputRecovery, true)
+  assert.deepEqual(payload.authoringWindow.outputRecoveryDraft, draft)
   const ordinary = toPromptPayload({ ...request, outputRecovery: false }) as any
-  assert.equal(ordinary.outputRecoveryDraft, undefined)
+  assert.equal(ordinary.authoringWindow.outputRecoveryDraft, undefined)
 })
 
 test('recovery includes the actual detector diagnostics, not a generic duplicate warning', () => {
   const diagnostic = '时间应停在15:49；上一轮已读过消息，只处理本轮回复。'
-  const prompt = systemPrompt('intent-due', '', '', '', '', '', false, false, false, false, false, undefined, false, undefined, false, false, true, [], diagnostic)
+  const prompt = systemPrompt('intent-due', '', '', '', '', '', false, false, false, false, false, undefined, false, undefined, false, false, true, false, undefined, [], diagnostic)
   assert.ok(prompt.includes(diagnostic))
   assert.match(prompt, /alreadyNarrated/)
 })
@@ -129,8 +129,8 @@ test('compaction persistence removes resolved details and requests a continuity 
   service.cachedMemoryConfig = { sceneHookCharacters: 120, sceneSummaryCharacters: 500 }
   service.getStory = async () => ({ ...story, state: { ...story.state, workingDetails: details } })
   service.dbSet = async (table: string, query: unknown, changes: unknown) => updates.push({ table, query, changes })
-  service.activeArc = async () => null
-  await service.persistCompaction(story, { id: 1, hook: '', summary: '' }, { workingDetails: [{ label: '取餐', status: 'resolved', sourceEntryIds: [2122] }] }, [completed], now)
+  service.activeArc = async () => ({ id: 2, title: 'current' })
+  await service.persistCompaction(story, { id: 1, hook: '', summary: '' }, { scene: { summary: '当前场景' }, arc: { summary: '当前篇章' }, workingDetails: [{ label: '取餐', status: 'resolved', sourceEntryIds: [2122] }] }, [completed], now)
   const storyUpdate = updates.find(item => item.table === 'interlude_story')
   assert.ok(storyUpdate)
   assert.equal(storyUpdate.changes.state.workingDetails.length, 1)

@@ -61,6 +61,10 @@ test('rebase persists an archive boundary and starts fresh scenes without deleti
   service.serial = async (_id: string, work: any) => work()
   service.invalidateBufferedNarratives = () => {}
   service.historyVectors = new Map([['s', new Map([[1, {}]])]])
+  service.historyIndexes = new Map()
+  service.historyVectorLoads = new Map()
+  service.automaticRecallCache = new Map()
+  service.historyBackoff = new Map()
   service.historyVectorsReady = new Set(['s'])
   service.compactionBackoff = new Map()
   service.participants = async () => []
